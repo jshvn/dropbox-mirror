@@ -8,10 +8,16 @@ separate pipeline, specified in jgrid.net's atium spec; neither depends on the o
 
 Dropbox stays authoritative. Every night, Proton Drive comes to hold what Dropbox held at
 listing time, under `/my-files/Dropbox/`, with files that left Dropbox moved to Proton's
-trash. The pipeline runs on GitHub-hosted runners inside a pinned container image, moves at
-most `MAX_BATCHES` batches of `BATCH_GB` a night, checkpoints a SQLite state database to R2
-after every batch so a killed run repeats at most one batch, and pings healthchecks.io.
-Silence is the only alert.
+trash. The pipeline runs on GitHub-hosted runners inside a pinned container image, moves batches
+of `BATCH_GB` until a wall-clock budget of about three hours is spent, checkpoints a SQLite
+state database to R2 after every batch so a killed run repeats at most one batch,
+re-dispatches itself while work remains, and pings healthchecks.io. Silence is the only
+alert.
+
+There is no seed mode. The first run finds an empty state, treats the whole tree as the
+delta, and chains itself run after run until the tree is mirrored; a nightly run is the
+same run with a small delta that fits in one budget. R2 holds the only record of how far
+the mirror has got, and no run is ever told where to start.
 
 ```
 Dropbox (primary)
@@ -49,14 +55,15 @@ status is never evidence" — every mutation is confirmed by independent observa
 
 Goal: every morning, `/my-files/Dropbox/` matches the previous night's Dropbox listing;
 changed files are new Proton revisions; removed files are in Proton's trash; the state
-database records what landed with the hashes that prove it.
+database records what landed with the hashes that prove it, and no file is recorded until
+its bytes have been downloaded back from Proton and compared.
 
 Non-goals:
 
 - Two-way sync. Nothing written in Proton Drive flows back.
 - Anything outside `/my-files/Dropbox/` in Proton Drive.
-- Dropbox Paper, cloud docs and `.web` shortcuts: exported where Dropbox offers an export,
-  otherwise skipped and counted in the report.
+- Non-downloadable entries (Dropbox Paper, cloud-created docs, `.web` shortcuts): skipped
+  and counted in the report. Nothing is exported.
 - Real-time. Nightly is the cadence; Proton's fair-use rules are the reason.
 - Permanent deletion. The nightly run trashes; only a manually invoked task empties trash.
 
@@ -97,56 +104,99 @@ environment, dry-run rendering and the menu; the imported Python owns all logic.
 
 ```
 task sync:
-  clock -> session -> state -> inventory -> delta -> plan -> batches -> trash -> reconcile? -> report -> ping
+  clock -> session -> state -> inventory -> delta -> plan -> batches -> trash -> reconcile? -> report -> ping -> chain?
                                      per batch: fetch -> verify -> upload -> confirm -> roundtrip -> checkpoint
 ```
 
 | Step | What it does |
 |---|---|
-| `clock` | Stamp the run start (epoch + UTC hour); clear per-run outputs. The hour keys `reconcile`, read here because a long run crosses hours. |
+| `clock` | Stamp the run start (epoch + UTC hour); clear per-run outputs. The hour keys `reconcile`, read here because a long run crosses hours; the epoch anchors `RUN_BUDGET_MIN`. |
 | `session` | Fetch `.state/session.tar.age` from R2, decrypt with the age identity, unpack to `PROTON_DRIVE_CACHE_DIR`. One cheap `filesystem list` forces any pending token rotation now; write-back (re-encrypt, upload) runs immediately, and again after every later CLI call. |
-| `state` | Fetch `.state/state.sqlite.xz.age`, decrypt, decompress. Missing state: empty with `SEED=true`, rebuilt with `RECONCILE=true`, otherwise fail — a missing state must never be treated as an empty mirror. |
-| `inventory` | Recursive `files/list_folder` walk via the imported `dropbox_api` provider, each page committed to SQLite with its cursor (interrupt-resumable). Refuse a listing under a sanity floor so a truncated listing never becomes a trash list. Non-downloadable entries are recorded with their export format. With `SEED=true` or `OBSERVER=both`, the rclone observer also lists, and the imported reconciliation gate must pass before anything moves. |
+| `state` | Fetch `.state/state.sqlite.xz.age`, decrypt, decompress. A missing object is accepted as an empty state only when `.state/history/` is empty too, which is the first run ever; a missing object beside existing history is a failure, because a lost state must never be mistaken for an empty mirror. `RECONCILE=true` rebuilds from a Proton walk instead. |
+| `inventory` | Recursive `files/list_folder` walk via the imported `dropbox_api` provider, each page committed to SQLite with its cursor (interrupt-resumable). Refuse a listing under a sanity floor so a truncated listing never becomes a trash list. Non-downloadable entries are recorded and excluded from the delta. On reconcile runs the rclone observer also lists, and the imported reconciliation gate must pass before anything moves. |
 | `delta` | Compare inventory against `mirror_objects` on `(path_lower, size, content_hash)`: changed rows (upstream has, state lacks) and deleted rows (state has, upstream lacks). |
-| `plan` | Refuse a tree over `CEILING_GB` or a file the runner's disk cannot hold with 1 GiB headroom. Split changed rows into batches of at most `BATCH_GB` from listing sizes alone; an oversized file is a batch by itself. |
+| `plan` | Refuse a tree over `CEILING_GB` or a file the runner's disk cannot hold twice (staging plus its round-trip copy) with 1 GiB headroom. Split changed rows into batches of at most `BATCH_GB` from listing sizes alone; an oversized file is a batch by itself. |
+| `batches` | Run planned batches in order. Before each one: stop if elapsed time plus the longest batch so far would pass `RUN_BUDGET_MIN`. Stopping with batches left is a success that marks the run for `chain`. |
 | `fetch` | Empty staging; rclone `copy --files-from --ignore-existing` of the batch. A path that vanished since listing is skipped and never enters the state. |
-| `verify` | The one-pass hasher recomputes each staged file's Dropbox content hash against the listing and records SHA-1/SHA-256. Any mismatch fails the batch. Exports are verified best-effort against `export_hash`. |
+| `verify` | The one-pass hasher recomputes each staged file's Dropbox content hash against the listing and records SHA-1/SHA-256. Any mismatch fails the batch. |
 | `upload` | One `proton-drive filesystem upload STAGING/ /my-files/Dropbox -f create-new-revision -d merge -t --json --skip-thumbnails`. Session write-back follows. |
 | `confirm` | Parse the JSON summary: uploaded + skipped must equal the batch's row count, failures zero — guards the known zero-exit-with-missing-files case. |
-| `roundtrip` | Download each just-uploaded file back by UID path into isolated staging and byte-compare (resumable queue in SQLite). `ROUNDTRIP=full` by default — nightly deltas are small; `sample`/`false` for the seed, where full would double a tree-scale transfer. |
-| `checkpoint` | Merge the batch into `mirror_objects` with its hashes and UIDs; xz, age-encrypt, one PutObject to R2. The last step of a batch, always: a run that dies repeats at most one batch, and a run stopped at `MAX_BATCHES` with batches left is a success. |
+| `roundtrip` | Download every just-uploaded file back by UID path into isolated staging and byte-compare (resumable queue in SQLite). Every file, every run, no sampling: a row enters `mirror_objects` only after its bytes have come back from Proton identical. Every byte crosses Proton twice; the run budget and chaining absorb that. |
+| `checkpoint` | Merge the batch into `mirror_objects` with its hashes and UIDs; xz, age-encrypt, PutObject to `.state/history/<epoch>-<batch>.sqlite.xz.age` and then to `.state/state.sqlite.xz.age`. The last step of a batch, always: a run that dies repeats at most one batch, and a run stopped on budget with batches left is a success. |
 | `trash` | Only in a run where every planned batch landed: group deleted rows by parent folder, one `list --json` per folder to map names to UIDs, one `filesystem trash` call per folder with every UID, all recorded. Session write-back follows. |
 | `reconcile` | `auto` = the run whose start hour is the reconcile hour, weekly; or `RECONCILE=true`. Full Proton walk with the imported snapshot code (UID-based, resumable folder queue): state rows Proton lacks or mis-sizes are dropped (they re-upload next night); Proton nodes under the mirror root that neither upstream nor state knows are trashed, with evidence recorded. |
-| `report`, `ping` | Counts and bytes to the step summary — counts only, never path listings (section 7). Ping healthchecks.io; `/fail` on error. |
+| `report`, `ping` | The step summary of section 5.5, built from the state database alone. Ping healthchecks.io; `/fail` on error. |
+| `chain` | A workflow step, not a task: when `report` left a `chain` marker (batches remain and this run checkpointed at least one), `gh workflow run sync.yml` queues the next run behind this one in the concurrency group. A run that made no progress does not chain; it fails and pings `/fail`, so a batch that fails identically cannot loop. On atium the next cron tick is the chain. |
 
 ### 5.2 State: the SQLite database is the checkpoint, R2 is where it lives
 
 `state.sqlite` is the single durable artifact: the imported evidence tables plus
 `mirror_objects` (`path_lower` key → size, `content_hash`, `sha1`, `path_display` NFC,
 proton UID) — the record of what landed, advanced only after upload is confirmed. It lives
-at `.state/state.sqlite.xz.age` in a versioned R2 bucket beside
-`.state/session.tar.age`, both encrypted to the same age recipient because the state's
-path names are themselves sensitive (section 7). Bucket versioning means a bad write-back
-rolls back. The delta is recomputed from a fresh inventory every run, so there is no
-cross-night queue to corrupt and source drift is simply the next night's delta.
+at `.state/state.sqlite.xz.age` in an R2 bucket beside `.state/session.tar.age`, both
+encrypted to the same age recipient because the state's path names are themselves
+sensitive (section 7). R2 has no object versioning, so every checkpoint also writes a
+dated copy under `.state/history/`; a bad write-back rolls back with one `aws s3 cp` from
+the README runbook, and a bucket lifecycle rule expires history after 30 days. The session
+gets no history: a stale copy holds a rotated-out refresh token and cannot be restored.
+The delta is recomputed from a fresh inventory every run, so there is no
+cross-run queue to corrupt and source drift is simply the next run's delta. The state is
+also the progress record: the share of the current inventory present in `mirror_objects`
+is what the report calls percent mirrored, and nothing about where a run should start
+lives anywhere else.
 
 ### 5.3 Deletion and history policy
 
 A file removed from Dropbox is trashed in Proton the same night and stays recoverable
 until trash is emptied by hand (`task empty-trash` exists and is never scheduled). A file
 changed in Dropbox becomes a new Proton revision; Proton's version history is the
-cloud-side history. Trash and revisions count toward quota — `CEILING_GB` carries the
-headroom.
+cloud-side history. Trash and revisions count toward quota. The Proton plan holds 6 TB
+and Dropbox holds about 600 GB, so `CEILING_GB=4000` leaves 2 TB for trash, revisions and
+the rest of the account; the ceiling exists to catch runaway growth, not to ration space.
 
 ### 5.4 Throttles
 
-- Dropbox: listing serialized, downloads through rclone at conservative
-  `--tpslimit`/`--transfers`, obey `Retry-After` always.
-- Proton: the CLI's own limits (5 files in flight, built-in 429 back-off). One upload
-  invocation per batch, one trash pass, one listing walk a week. This is the pattern
-  Proton's CLI page describes as compliant.
-- `BATCH_GB=4`, `MAX_BATCHES=4` nightly by default; the first nights measure real
-  throughput and the defaults move.
+The rule: stay about 10% under every published limit. Where a provider publishes none,
+keep its client's defaults and let the throttle counters in the report drive changes.
+
+| Provider | Known limit | Setting |
+|---|---|---|
+| Dropbox API | about 12 calls/s per user, always with `Retry-After` | listing serialized, one request in flight; rclone `--tpslimit 10 --tpslimit-burst 1 --transfers 4`; `Retry-After` honored and every occurrence counted |
+| Proton | none published; the CLI ships 5 files in flight and its own 429 back-off | CLI defaults kept as shipped; one upload invocation per batch, one trash pass, one listing walk a week, the pattern Proton's CLI page calls compliant |
+| GitHub runner | 6 h per job, ~14 GB disk | `timeout-minutes: 180`, `RUN_BUDGET_MIN=165`; a batch needs at most `2 * BATCH_GB` of disk |
+
+Proton fair use is measured, not known: sustained GB/h and 429s in CLI output are the
+gauge, and `BATCH_GB` (default 4) drops if they say so. The budget leaves the last
+batch's round-trip, session write-back and report room to finish inside the job timeout.
+
+### 5.5 Reporting
+
+Every run writes one GitHub step summary, built by `report` from the state database
+alone so it is identical on any host. Counts only, never names (section 7); error
+messages stay in the encrypted state, where `task report` renders the same summary
+locally with them. Sections:
+
+- **Mirror status**, from R2 as the source of truth: inventory files and bytes; mirrored
+  files and bytes (`mirror_objects` rows matching the inventory); percent mirrored;
+  non-downloadable entries skipped; batches and bytes remaining; projected runs remaining
+  at this run's throughput; whether this run chained.
+- **This run:** budget used of `RUN_BUDGET_MIN`; batches planned, completed, and repeated
+  from a killed run; files and bytes fetched, uploaded, skipped as SHA-1 identical,
+  round-tripped, mismatched; files trashed; paths that vanished between listing and fetch.
+- **Throughput:** GB/h down from Dropbox, up to Proton, down from Proton on round-trip;
+  batch durations (min, median, max); hasher throughput.
+- **Throttling**, per provider: 429 and `Retry-After` responses, total seconds waited,
+  longest single wait, seconds spent in retries; Proton session refreshes seen. The
+  Proton CLI backs off internally, so its count comes from CLI output and may undercount;
+  the sustained upload rate beside it is the second gauge.
+- **Errors and issues:** counts by class (content-hash mismatch, upload failure,
+  round-trip mismatch, listing refused, session trouble, command non-zero exit), from
+  the `events` and `commands` tables.
+- **Verification:** files proven identical by round-trip this run and cumulatively, and a
+  mismatch line that must read zero.
+
+Every figure is also written to `events`, so the trend across runs is a query against
+the state.
 
 ## 6. Secrets: 1Password at runtime, the terraform pattern
 
@@ -225,13 +275,15 @@ dropbox-mirror/
 
 ## 9. Workflow and dispatch
 
-`sync.yml`: `workflow_dispatch` only, inputs `seed`, `reconcile`, `max_batches`,
-`empty_trash`; `concurrency: {group: sync, cancel-in-progress: false}` (overlap kills the
-Proton session); `timeout-minutes: 350`; `permissions: contents: read`. Nothing in this
-repo starts it: jshvn/dispatch POSTs the dispatch nightly from a `schedules/dropbox-mirror.ts`
-on its own cron expression (proposed `10 2 * * *`; 3 of the account's 5 are in use). The
-healthchecks.io check matches that cron with a grace that absorbs a queued run plus a full
-one; pause it before a seed.
+`sync.yml`: `workflow_dispatch` only, inputs `reconcile`, `empty_trash`,
+`budget_minutes`; `concurrency: {group: sync, cancel-in-progress: false}` (overlap kills
+the Proton session, and it is what queues a chained or scheduled run behind a running
+one); `timeout-minutes: 180`; `permissions: {contents: read, actions: write}`, the write
+only for `chain`. Nothing else in this repo starts it: jshvn/dispatch POSTs the dispatch
+nightly from a `schedules/dropbox-mirror.ts` on its own cron expression (proposed
+`10 2 * * *`; 3 of the account's 5 are in use). The healthchecks.io check matches that
+cron with a grace that absorbs a queued run plus a full one; chained runs ping more often,
+which it ignores.
 
 `check.yml` on pull requests: pytest, ruff, and `task --dry --force sync` — renders every
 command with no network and no credentials.
@@ -247,19 +299,25 @@ command with no network and no credentials.
    sign in in the browser, then `task session-seal` to age-encrypt and upload the session
    bundle. Create `/my-files/Dropbox` in Proton.
 4. Measure: Dropbox total size and count, largest file, largest folder (the ~30k
-   entries-per-folder ceiling). Set `CEILING_GB` from the Proton plan minus headroom.
-5. Seed: `task seed` (sync with `SEED=true`, dual observers, `ROUNDTRIP=sample`, no batch
-   cap) across as many dispatched runs as it takes; each run resumes from the checkpoint.
-   The seed is where fair-use throttling shows; slow is fine.
-6. Enable the dispatch schedule. Three green nights, then a deliberate edit and a
-   deliberate delete in Dropbox must appear in Proton the next morning.
+   entries-per-folder ceiling). `CEILING_GB=4000` (section 5.3).
+5. Seed: dispatch `sync.yml` once. The first run finds no state and no history, treats
+   the whole tree as the delta, and chains itself until the tree is mirrored; each step
+   summary shows percent mirrored and projected runs remaining. This is where fair-use
+   throttling shows; slow is fine.
+6. Enable the dispatch schedule, at once if convenient: a scheduled run queues behind a
+   chained one. Three green nights, then a deliberate edit and a deliberate delete in
+   Dropbox must appear in Proton the next morning.
 
 ## 11. Acceptance
 
 - A file edited in Dropbox has a new revision in Proton the next morning; a deleted file
   is in Proton's trash; an added file is present with its SHA-1 recorded in
   `mirror_objects`.
-- A run killed mid-batch repeats only that batch the next night.
+- The whole tree is mirrored from one dispatch with no operator input, and every row in
+  `mirror_objects` carries round-trip evidence.
+- A run killed mid-batch repeats only that batch the next run.
+- A run that stops on budget with batches left reports success, states percent mirrored
+  and runs remaining, and the next run resumes from R2 alone.
 - A run that cannot refresh the Proton session fails loudly, pings `/fail`, and the
   README runbook restores it with one laptop login.
 - `task --dry --force sync` renders every command with no network; the imported pytest
@@ -283,11 +341,10 @@ command with no network and no credentials.
 5. **Scale.** Folders past ~30k entries fail on Proton; measure before seeding.
 6. **A Python codebase instead of a Taskfile-only pipeline** — offset by inheriting the
    donor's test suite and keeping all operational behavior in the Taskfile surface.
+7. **Chain loop.** A batch failing identically every run would chain forever; a run that
+   checkpoints nothing does not chain and fails loudly instead.
 
 ## 13. Open questions for iteration
 
 1. The nightly hour (`10 2 * * *` proposed) and the reconcile hour keyed from it.
-2. `CEILING_GB`: which Proton plan, how much headroom for trash and revisions.
-3. Whether Dropbox Paper docs are exported (HTML or Markdown) or skipped.
-4. Whether the seed runs `ROUNDTRIP=sample` (proposed) or `full` at the cost of doubling
-   the transfer.
+   Deferred: settled when the dispatch schedule is enabled (bootstrap step 6).

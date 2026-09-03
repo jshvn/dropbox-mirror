@@ -571,7 +571,7 @@ is unverified.
 
 | Scenario | What happens | Mitigation |
 |---|---|---|
-| Run refreshes, then dies before write-back | Stored blob has the old refresh token; next run's first 401 triggers refresh -> 4xx -> `signOut()` deletes the file -> "You need to login first". Manual re-login. | Write the session back immediately after every CLI step, not only at job end; run a cheap authenticated call at job start so rotation happens early. Keep the file on durable versioned storage, not a 48 KB Actions secret. |
+| Run refreshes, then dies before write-back | Stored blob has the old refresh token; next run's first 401 triggers refresh -> 4xx -> `signOut()` deletes the file -> "You need to login first". Manual re-login. | Write the session back immediately after every CLI step, not only at job end; run a cheap authenticated call at job start so rotation happens early. Keep the file in durable object storage, not a 48 KB Actions secret. |
 | Two runs overlap | Both hold the same refresh token; the second to refresh gets 4xx and wipes its copy. `events.lock` denies event subscriptions to the second process. | `concurrency: { group, cancel-in-progress: false }`. Never overlap. |
 | Refresh returns 429 | Session kept; CLI exits non-zero. | Retry later; not a re-login. |
 | Account-side revoke or 60 idle days | Refresh 4xx -> session wiped. | Nightly cadence keeps it warm; alert on "login first". |
@@ -660,7 +660,8 @@ unsafe_file restore/write-back scheme works with the code as shipped:
 
 1. One-time: on a laptop, `PROTON_DRIVE_CACHE_DIR=./pd PROTON_DRIVE_CREDENTIALS_STORE=unsafe_file
    proton-drive auth login`, telemetry off in account settings. Encrypt
-   `pd/auth-session.json` + `pd/clientUid.json` (age/sops) into a versioned R2/S3 object.
+   `pd/auth-session.json` + `pd/clientUid.json` (age/sops) into an R2/S3 object (R2 has no
+   object versioning; keep dated copies of anything that must roll back).
 2. Per run: `concurrency` group; restore the dir; a cheap `filesystem list /my-files --json`
    first (forces any pending refresh early); after each CLI invocation re-encrypt and
    upload the session file; alert on exit 1 containing "login first".
