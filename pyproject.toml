@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=80"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dropbox-mirror"
+version = "0.1.0"
+description = "Nightly Dropbox to Proton Drive mirror run from GitHub Actions"
+requires-python = ">=3.13"
+license = "MIT"
+license-files = ["LICENSE"]
+dependencies = ["requests>=2.32,<3"]
+
+[project.optional-dependencies]
+test = ["pytest>=8.4,<9", "ruff>=0.16,<1"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.ruff]
+target-version = "py313"
+line-length = 88
+
+[tool.ruff.lint]
+# RunLogger uses (phase, operation, message), not stdlib formatting.
+ignore = ["PLE1205"]
