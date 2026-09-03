@@ -1,0 +1,95 @@
+# dropbox-mirror: nightly Dropbox -> Proton Drive mirror run from GitHub Actions.
+#
+# Invariant: every step runs inside the toolbox image, on a laptop and in CI
+# alike, and R2 holds the only record of how far the mirror has got. Secrets
+# reach processes by name from 1Password (op.env); nothing is written to disk.
+# Design: docs/superpowers/specs/2026-09-03-dropbox-mirror-design.md
+version: '3'
+
+vars:
+  IMAGE: dropbox-mirror:toolbox
+  ENGINE:
+    sh: |
+      if [ -n "$ENGINE" ]; then echo "$ENGINE"
+      elif command -v container >/dev/null 2>&1 && container system status >/dev/null 2>&1; then echo container
+      elif command -v docker >/dev/null 2>&1; then echo docker
+      elif command -v container >/dev/null 2>&1; then echo container
+      else echo docker
+      fi
+  # Every name in op.env crosses into the container by name, never by value.
+  PASS_ENV:
+    sh: grep -v '^#' op.env | sed -n 's/=.*//p' | sed 's/^/-e /' | tr '\n' ' '; printf -- '-e RUN_BUDGET_MIN -e RECONCILE -e ENGINE -e MIRROR_VERBOSE -e GITHUB_RUN_ID'
+
+tasks:
+  default:
+    desc: Print the menu
+    silent: true
+    # ponytail: hand-maintained listing -- go-task can neither group nor annotate,
+    # so a new task means a line below. `task --list` stays the generated view.
+    cmds:
+      - |
+        b=$(printf '\033[1m'); c=$(printf '\033[1;36m'); d=$(printf '\033[2m'); r=$(printf '\033[0m')
+        printf '%s\n' \
+          "" \
+          "${b}dropbox-mirror${r}   ${d}nightly Dropbox -> Proton Drive mirror; R2 holds the state${r}" \
+          "" \
+          "${c}checks -- offline, no credentials${r}" \
+          "  task test                 pytest inside the toolbox" \
+          "  task lint                 ruff check + format check" \
+          "  task fmt                  ruff format" \
+          "" \
+          "${c}toolbox${r}" \
+          "  task image                Build the toolbox image (no-op while it exists)" \
+          "  task image-clean          Remove it so the next task image rebuilds" \
+          "  task run -- <cmd>         Run any command in the toolbox with the repo at /work" \
+          "  task op -- <cmd>          Same, with secrets from 1Password via op.env" \
+          ""
+
+  image:
+    desc: Build the toolbox image
+    run: once
+    # Image presence is the freshness check; a Dockerfile edit needs `task image-clean`.
+    status:
+      - '{{.ENGINE}} image inspect {{.IMAGE}} >/dev/null 2>&1'
+    cmds:
+      - '{{.ENGINE}} build -t {{.IMAGE}} -f docker/Dockerfile .'
+
+  image-clean:
+    desc: Remove the toolbox image
+    cmds:
+      - '{{.ENGINE}} image rm {{.IMAGE}}'
+
+  run:
+    desc: 'Run any command in the toolbox image, e.g. task run -- task test'
+    deps: [image]
+    cmds:
+      - >-
+        {{.ENGINE}} run --rm -i $(test -t 0 && test -t 1 && echo -t || true)
+        --user $(id -u):$(id -g)
+        -v "{{.ROOT_DIR}}":/work -w /work
+        -e HOME=/tmp
+        {{.PASS_ENV}}
+        {{.IMAGE}} {{.CLI_ARGS}}
+
+  op:
+    desc: 'Run a command in the toolbox with secrets from 1Password'
+    cmds:
+      - op run --env-file=op.env -- task run -- {{.CLI_ARGS}}
+
+  test:
+    desc: Run the test suite inside the toolbox
+    cmds:
+      - task: run
+        vars: { CLI_ARGS: 'python -m pytest {{.CLI_ARGS}}' }
+
+  lint:
+    desc: ruff check and format check
+    cmds:
+      - task: run
+        vars: { CLI_ARGS: 'sh -c "ruff check src tests && ruff format --check src tests"' }
+
+  fmt:
+    desc: ruff format
+    cmds:
+      - task: run
+        vars: { CLI_ARGS: 'ruff format src tests' }
