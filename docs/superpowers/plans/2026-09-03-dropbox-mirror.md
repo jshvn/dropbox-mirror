@@ -66,14 +66,16 @@ Changed inline:
 18. `report` returned PASS for a FAIL run, so `pipeline` went on to ping success. It returns the run status now (Task 17), and the workflow's single `always()` step publishes the summary and pings `/fail` unless the job succeeded (Task 19).
 19. Report throttling and error counts were all-time; they are scoped to the run's `started_at` (Task 17).
 20. Files listed as downloadable but without `content_hash` were silently never mirrored and never counted; Task 10 reclassifies them as non-downloadable in the listing.
-21. Batches are capped at 5,000 files as well as `BATCH_GB` (Task 12); see finding A.
+21. Batches are capped at `budget.batch_files` (default 5,000) as well as `BATCH_GB` (Tasks 3 and 12); see finding A.
+22. Finding B below is adopted: `verify` skips and counts a content-hash mismatch, and fails only when every file in the batch mismatches (Task 13; spec 5.1 updated to match).
+23. Finding D below is adopted: shared test helpers live in `conftest.py`, appended by the task that first needs them (Tasks 8, 10, 13).
 
 Not changed:
 
 - **A. Round-trip cost is per file, not per byte.** `roundtrip` spawns one `proton-drive filesystem download` per file. The Bun binary's start-up plus one authenticated request is seconds per file, so a batch of small files is bounded by count. The tree holds 200k to 300k files, mostly images and text, so the seed's round-trip time is that count times the per-file cost whatever the cap; the cap only decides whether one batch fits inside one run. At 5,000 files a batch needs the per-file cost under about 1.8 s to finish inside `RUN_BUDGET_MIN`, and the budget check runs before a batch starts, not during it: a batch that cannot finish is killed by the job timeout before it checkpoints, and the next run repeats it, forever. The spec's "every file, every run, no sampling" stands; the cap keeps a batch inside the budget only if the measured cost allows. The upgrade path is a recursive folder download when a batch covers a whole folder. `roundtrip_seconds` on the first runs decides.
-- **B. `verify` fails the whole run on one content-hash mismatch**, as spec 5.1 says. A file being edited during the run window does that every night it happens. Skipping the item the way VANISHED is skipped (counted, never entering the state, caught by the next listing) is the same amount of code and meets the spec's actual goal, which is that wrong bytes are never recorded.
+- **B (adopted). `verify` failed the whole run on one content-hash mismatch**, as spec 5.1 said. A file being edited during the run window does that every night it happens. Skipping the item the way VANISHED is skipped (counted, never entering the state, caught by the next listing) is the same amount of code and meets the spec's actual goal, which is that wrong bytes are never recorded.
 - **C. Donor DDL and signatures were written from memory of `cfd0e57`.** Column names in the seed helpers (`dropbox_objects`, `dropbox_inventory_runs`, `dropbox_pages`, `rclone_*`, `proton_nodes`, `proton_folders`, `events`, `commands`), `start_phase`'s keyword set (`tool_versions` in Task 4's test, `command_parameters` in Task 5's runner), `record_artifact`, the `walk_tree` item attributes, and whether `validate_dropbox_scope("")` accepts the whole-Dropbox root all need checking against the checkout; Task 4 step 5 says where.
-- **D. Shared test helpers** (`FakeStore`, `plain_crypt`, `FakeProton`, `_node`, `_seed_api_inventory`) are imported across `test_*.py` files; the global constraint says fixtures live in `conftest.py`. Moving them is mechanical and belongs to the first importing task (8).
+- **D (adopted). Shared test helpers** (`FakeStore`, `plain_crypt`, `FakeProton`, `_node`, `_seed_api_inventory`) are imported across `test_*.py` files; the global constraint says fixtures live in `conftest.py`. Moving them is mechanical and belongs to the first importing task (8).
 - **E. The toolbox image is rebuilt from upstream downloads on every CI run.** A proton.me or GitHub release outage fails the night, which silence-is-the-alert tolerates; publishing the image to GHCR is the fix if it bites.
 - **F. Runtime preflight of binary versions** (spec section 8) happens only at image build. `provider.version()` at the top of `batches` is the addition if a mounted binary ever matters.
 - **G. Case-only renames in Dropbox** (`Report.pdf` to `report.pdf`) produce no delta and leave Proton's name unchanged, because the key is `path_lower`.
@@ -254,7 +256,7 @@ run_phase(command: str, *, apply: bool, runtime: Runtime) -> str
 State tables added to the donor schema (Task 4 has the DDL):
 `runs`, `mirror_objects`, `delta_changed`, `delta_deleted`, `batches`, `batch_items`, `deletions`.
 Statuses: `batches.status` in PLANNED, CHECKPOINTED, FAILED; `batch_items.status` in PLANNED,
-VANISHED, FETCHED, VERIFIED, CONFIRMED, CONFIRM_FAILED, ROUNDTRIP_OK, ROUNDTRIP_MISMATCH,
+VANISHED, FETCHED, HASH_MISMATCH, VERIFIED, CONFIRMED, CONFIRM_FAILED, ROUNDTRIP_OK, ROUNDTRIP_MISMATCH,
 CHECKPOINTED; `deletions.status` in TRASHED, NOT_FOUND, LISTING_FAILED.
 
 ---
@@ -295,7 +297,7 @@ where = ["src"]
 [tool.pytest.ini_options]
 addopts = "-ra"
 testpaths = ["tests"]
-pythonpath = ["src", "."]
+pythonpath = ["src"]
 
 [tool.ruff]
 target-version = "py313"
@@ -693,6 +695,7 @@ def test_defaults_and_derived_bytes(tmp_path):
     cfg = load_config(_write(tmp_path, GOOD))
     assert cfg.rclone.tps_limit == 10
     assert cfg.budget.batch_gb == 4
+    assert cfg.budget.batch_files == 5000
     assert cfg.budget.batch_bytes == 4 * 1024**3
     assert cfg.budget.run_budget_minutes == 165
     assert cfg.budget.ceiling_gb == 4000
@@ -784,6 +787,7 @@ class Proton:
 @dataclass(frozen=True)
 class Budget:
     batch_gb: float = 4
+    batch_files: int = 5000
     run_budget_minutes: int = 165
     ceiling_gb: float = 4000
     disk_headroom_gb: float = 1
@@ -884,6 +888,7 @@ def validate_config(cfg: Config) -> None:
     _positive(cfg.proton.command_timeout_seconds, "proton.command_timeout_seconds")
     _positive(cfg.proton.transfer_timeout_seconds, "proton.transfer_timeout_seconds")
     _positive(cfg.budget.batch_gb, "budget.batch_gb")
+    _positive_int(cfg.budget.batch_files, "budget.batch_files")
     _positive_int(cfg.budget.run_budget_minutes, "budget.run_budget_minutes")
     _positive(cfg.budget.ceiling_gb, "budget.ceiling_gb")
     _nonnegative(cfg.budget.disk_headroom_gb, "budget.disk_headroom_gb")
@@ -920,6 +925,12 @@ expected_destination_uid = "REPLACE_AT_BOOTSTRAP"
 
 [budget]
 batch_gb = 4
+# ponytail: the round-trip downloads one file per CLI process, seconds each, so a batch
+# is bounded by its file count as much as by its bytes. 5,000 fits the budget only when
+# the measured cost is under about 1.8 s per file (README, first-run checks); a batch
+# that cannot finish never checkpoints and repeats every run. The upgrade path is a
+# recursive folder download when a batch covers a whole folder.
+batch_files = 5000
 run_budget_minutes = 165
 ceiling_gb = 4000
 disk_headroom_gb = 1
@@ -2275,23 +2286,15 @@ def test_bucket_required(runtime_factory, tmp_path):
         Store(runtime, WorkPaths.from_runtime(runtime))
 ```
 
-`tests/test_session.py`:
+Append to `tests/conftest.py` (shared by every later test that touches R2 or age):
 
 ```python
-from __future__ import annotations
-
-import io
-import tarfile
-from pathlib import Path
-
-import pytest
-
 from migrator import crypt, session
-from migrator.paths import WorkPaths
-from migrator.phases.base import PhaseError
 
 
 class FakeStore:
+    """In-memory stand-in for migrator.store.Store."""
+
     def __init__(self):
         self.objects: dict[str, bytes] = {}
 
@@ -2320,6 +2323,25 @@ def plain_crypt(monkeypatch):
     monkeypatch.setattr(crypt, "encrypt", lambda identity, key_file, source, target, run=None: target.write_bytes(source.read_bytes()))
     monkeypatch.setattr(crypt, "decrypt", lambda identity, key_file, source, target, run=None: target.write_bytes(source.read_bytes()))
     monkeypatch.setattr(session, "_last_digest", None)
+```
+
+Test modules reach the helper classes with `from conftest import FakeStore`; fixtures such as `plain_crypt` are visible by name without an import.
+
+`tests/test_session.py`:
+
+```python
+from __future__ import annotations
+
+import io
+import tarfile
+from pathlib import Path
+
+import pytest
+from conftest import FakeStore
+
+from migrator import session
+from migrator.paths import WorkPaths
+from migrator.phases.base import PhaseError
 
 
 def _ready(runtime_factory, tmp_path):
@@ -2380,7 +2402,7 @@ import pytest
 from migrator import crypt, statefile
 from migrator.phases.base import PhaseError
 from migrator.state import State
-from tests.test_session import FakeStore, plain_crypt  # noqa: F401
+from conftest import FakeStore
 
 
 def test_fresh_when_bucket_has_no_state_and_no_history(state_context, plain_crypt):
@@ -2767,7 +2789,7 @@ import pytest
 from migrator import commands
 from migrator.paths import WorkPaths
 from migrator.state import State
-from tests.test_session import FakeStore, plain_crypt  # noqa: F401
+from conftest import FakeStore
 
 
 def test_clock_writes_stamp_and_clears_outputs(runtime_factory, tmp_path):
@@ -3074,26 +3096,11 @@ git commit -m "feat(commands): clock, session, state, ping, status, rollback, se
 
 - [ ] **Step 1: Write the failing tests**
 
-`tests/test_inventory.py`:
+Append to `tests/conftest.py`:
 
 ```python
-from __future__ import annotations
-
-import pytest
-
-from migrator.phases import p10_inventory
-from migrator.phases.base import PhaseContext, PhaseError
-
-
-def _ctx(state_context, reconcile=False):
-    cfg, paths, state, logger, runtime = state_context
-    run_id = state.start_run(start_epoch=1, hour_utc=0, weekday=0, budget_minutes=1, host="t",
-                             reconcile=reconcile)
-    phase_run_id = state.start_phase(10, "10_inventory", apply=False, inputs={})
-    return PhaseContext(cfg, paths, state, logger, False, phase_run_id, run_id, runtime)
-
-
-def _seed_api_inventory(state, purpose, rows):
+def seed_api_inventory(state, purpose, rows):
+    """rows: (path_display, size, content_hash, is_downloadable, tag). Returns the inventory id."""
     with state.connection:
         cursor = state.connection.execute(
             """INSERT INTO dropbox_inventory_runs(started_at, completed_at, status, account_id,
@@ -3110,13 +3117,33 @@ def _seed_api_inventory(state, purpose, rows):
                  path.lower(), size, content_hash, downloadable),
             )
     return inventory_id
+```
+
+`tests/test_inventory.py`:
+
+```python
+from __future__ import annotations
+
+import pytest
+from conftest import seed_api_inventory
+
+from migrator.phases import p10_inventory
+from migrator.phases.base import PhaseContext, PhaseError
+
+
+def _ctx(state_context, reconcile=False):
+    cfg, paths, state, logger, runtime = state_context
+    run_id = state.start_run(start_epoch=1, hour_utc=0, weekday=0, budget_minutes=1, host="t",
+                             reconcile=reconcile)
+    phase_run_id = state.start_phase(10, "10_inventory", apply=False, inputs={})
+    return PhaseContext(cfg, paths, state, logger, False, phase_run_id, run_id, runtime)
 
 
 def test_inventory_records_counts_and_run_link(state_context, monkeypatch):
     ctx = _ctx(state_context)
     rows = [("/A/one.txt", 3, "h1", 1, "file"), ("/A", None, None, 1, "folder"),
             ("/notes.paper", 0, None, 0, "file")]
-    inventory_id = _seed_api_inventory(ctx.state, "run:1", rows)
+    inventory_id = seed_api_inventory(ctx.state, "run:1", rows)
     monkeypatch.setattr(p10_inventory, "access_token", lambda cfg, runtime: "tok")
     monkeypatch.setattr(p10_inventory.DropboxAPIProvider, "inventory",
                         lambda self, purpose, reuse_complete=True: inventory_id)
@@ -3129,7 +3156,7 @@ def test_inventory_records_counts_and_run_link(state_context, monkeypatch):
 
 def test_unhashed_files_become_non_downloadable(state_context, monkeypatch):
     ctx = _ctx(state_context)
-    inventory_id = _seed_api_inventory(ctx.state, "run:1", [("/cloud.gdoc", 0, None, 1, "file"),
+    inventory_id = seed_api_inventory(ctx.state, "run:1", [("/cloud.gdoc", 0, None, 1, "file"),
                                                             ("/real.txt", 2, "h", 1, "file")])
     monkeypatch.setattr(p10_inventory, "access_token", lambda cfg, runtime: "tok")
     monkeypatch.setattr(p10_inventory.DropboxAPIProvider, "inventory",
@@ -3140,7 +3167,7 @@ def test_unhashed_files_become_non_downloadable(state_context, monkeypatch):
 
 def test_prune_keeps_newest_inventories(state_context):
     _, _, state, _, _ = state_context
-    ids = [_seed_api_inventory(state, f"run:{n}", [("/a.txt", 1, "h", 1, "file")]) for n in range(4)]
+    ids = [seed_api_inventory(state, f"run:{n}", [("/a.txt", 1, "h", 1, "file")]) for n in range(4)]
     assert p10_inventory.prune_inventories(state.connection, keep=2) == 2
     left = {r["inventory_id"] for r in state.connection.execute("SELECT inventory_id FROM dropbox_objects")}
     assert left == set(ids[2:])
@@ -3148,7 +3175,7 @@ def test_prune_keeps_newest_inventories(state_context):
 
 def test_reconcile_run_gates_on_observer(state_context, monkeypatch):
     ctx = _ctx(state_context, reconcile=True)
-    inventory_id = _seed_api_inventory(ctx.state, "run:1", [("/A/one.txt", 3, "h1", 1, "file")])
+    inventory_id = seed_api_inventory(ctx.state, "run:1", [("/A/one.txt", 3, "h1", 1, "file")])
     monkeypatch.setattr(p10_inventory, "access_token", lambda cfg, runtime: "tok")
     monkeypatch.setattr(p10_inventory.DropboxAPIProvider, "inventory",
                         lambda self, purpose, reuse_complete=True: inventory_id)
@@ -3317,7 +3344,7 @@ import pytest
 
 from migrator.phases import p20_delta
 from migrator.phases.base import PhaseContext, PhaseError
-from tests.test_inventory import _seed_api_inventory
+from conftest import seed_api_inventory
 
 
 def _ctx(state_context):
@@ -3339,7 +3366,7 @@ def _mirror(state, rows):
 
 def test_changed_and_deleted_rows(state_context):
     ctx = _ctx(state_context)
-    inventory_id = _seed_api_inventory(ctx.state, "run:1", [
+    inventory_id = seed_api_inventory(ctx.state, "run:1", [
         ("/Docs", None, None, 1, "folder"),
         ("/Docs/same.txt", 3, "h-same", 1, "file"),
         ("/Docs/edited.txt", 4, "h-new", 1, "file"),
@@ -3365,7 +3392,7 @@ def test_changed_and_deleted_rows(state_context):
 def test_display_path_takes_parent_casing_from_folder_entries_and_nfc(state_context):
     ctx = _ctx(state_context)
     nfd = unicodedata.normalize("NFD", "Café")
-    inventory_id = _seed_api_inventory(ctx.state, "run:1", [
+    inventory_id = seed_api_inventory(ctx.state, "run:1", [
         ("/Photos", None, None, 1, "folder"),
         (f"/Photos/{nfd}", None, None, 1, "folder"),
         (f"/photos/{nfd}/IMG.jpg", 2, "h", 1, "file"),
@@ -3377,7 +3404,7 @@ def test_display_path_takes_parent_casing_from_folder_entries_and_nfc(state_cont
 
 def test_listing_floor_refuses_truncated_listing(state_context):
     ctx = _ctx(state_context)
-    inventory_id = _seed_api_inventory(ctx.state, "run:1", [("/a.txt", 1, "h", 1, "file")])
+    inventory_id = seed_api_inventory(ctx.state, "run:1", [("/a.txt", 1, "h", 1, "file")])
     ctx.state.update_run(ctx.run_id, inventory_id=inventory_id)
     _mirror(ctx.state, [(f"/f{i}.txt", f"/f{i}.txt", 1, "h") for i in range(10)])
     with pytest.raises(PhaseError, match="floor"):
@@ -3386,7 +3413,7 @@ def test_listing_floor_refuses_truncated_listing(state_context):
 
 def test_first_run_has_no_floor(state_context):
     ctx = _ctx(state_context)
-    inventory_id = _seed_api_inventory(ctx.state, "run:1", [("/a.txt", 1, "h", 1, "file")])
+    inventory_id = seed_api_inventory(ctx.state, "run:1", [("/a.txt", 1, "h", 1, "file")])
     ctx.state.update_run(ctx.run_id, inventory_id=inventory_id)
     assert p20_delta.run(ctx).outputs["changed_files"] == 1
 ```
@@ -3584,7 +3611,7 @@ def _changed(ctx, rows):
 def test_pack_is_greedy_in_path_order_with_oversized_alone():
     rows = [{"path_lower": "/a", "size": 6}, {"path_lower": "/b", "size": 5},
             {"path_lower": "/c", "size": 20}, {"path_lower": "/d", "size": 1}]
-    batches = p30_plan.pack(rows, batch_bytes=10)
+    batches = p30_plan.pack(rows, batch_bytes=10, batch_files=5000)
     assert [[r["path_lower"] for r in b] for b in batches] == [["/a"], ["/b"], ["/c"], ["/d"]]
 
 
@@ -3648,16 +3675,11 @@ from typing import Any
 from .base import PhaseContext, PhaseError, PhaseResult
 
 PHASE = "30_plan"
-# ponytail: the round-trip downloads one file per CLI process, seconds each, so a batch
-# is bounded by its file count as much as by its bytes. 5,000 fits the budget only when
-# the measured cost is under about 1.8 s per file (see the README's first-run checks); a
-# batch that cannot finish never checkpoints and repeats every run. The upgrade path is a
-# recursive folder download when a batch covers a whole folder.
-BATCH_FILES = 5000
 
 
-def pack(rows: list[Any], batch_bytes: int, batch_files: int = BATCH_FILES) -> list[list[Any]]:
-    """Greedy first-fit in path order; a file over batch_bytes is a batch by itself."""
+def pack(rows: list[Any], batch_bytes: int, batch_files: int) -> list[list[Any]]:
+    """Greedy first-fit in path order by bytes and by file count (budget.batch_files
+    explains why); a file over batch_bytes is a batch by itself."""
     batches: list[list[Any]] = []
     current: list[Any] = []
     current_bytes = 0
@@ -3697,7 +3719,7 @@ def run(ctx: PhaseContext) -> PhaseResult:
     needed = min(budget.batch_bytes, sum(int(r["size"]) for r in rows)) + largest + budget.headroom_bytes
     if largest and free < needed:
         raise PhaseError(f"disk cannot hold a batch plus its round-trip copy: {free} free, {needed} needed")
-    batches = pack(rows, budget.batch_bytes)
+    batches = pack(rows, budget.batch_bytes, budget.batch_files)
     with connection:
         # A PLANNED batch from any run was never executed; each run re-plans from the
         # state, so those rows are dead weight in every checkpoint that follows.
@@ -3754,6 +3776,46 @@ git commit -m "feat(plan): ceiling and disk guards, greedy batch packing"
 
 - [ ] **Step 1: Write the failing tests**
 
+Append to `tests/conftest.py`:
+
+```python
+from migrator.providers.proton_cli import ProtonCLIError
+
+
+class FakeProton:
+    """Stand-in for ProtonCLIProvider: canned listings, canned download bytes."""
+
+    def __init__(self, listings: dict[str, list[dict]], downloads: dict[str, bytes], fail_list=()):
+        self.listings = listings
+        self.downloads = downloads
+        self.fail_list = set(fail_list)
+        self.uploads = []
+        self.downloaded = []
+
+    def root_uid(self, phase):
+        return "uid-destination"
+
+    def upload_tree(self, sources, destination, phase):
+        self.uploads.append(([str(s) for s in sources], destination))
+        return '{"ok":true}'
+
+    def list_folder(self, path, phase):
+        if path in self.fail_list:
+            raise ProtonCLIError("EXIT_1")
+        return self.listings[path]
+
+    def download_file(self, remote_path, local_parent: Path, phase):
+        self.downloaded.append(remote_path)
+        local_parent.mkdir(parents=True, exist_ok=True)
+        (local_parent / "file").write_bytes(self.downloads[remote_path])
+
+
+def proton_node(uid, name, size, sha1, kind="file"):
+    """One entry as `proton-drive filesystem list -j` returns it."""
+    return {"uid": uid, "name": {"ok": True, "value": name}, "type": kind,
+            "activeRevision": {"claimedSize": size, "claimedDigests": {"sha1": sha1, "sha1Verified": True}}}
+```
+
 `tests/test_batch.py`:
 
 ```python
@@ -3764,12 +3826,11 @@ import json
 from pathlib import Path
 
 import pytest
+from conftest import FakeProton, FakeStore, proton_node
 
 from migrator.hashing import hash_file
 from migrator.phases import batch
 from migrator.phases.base import PhaseContext, PhaseError
-from migrator.providers.proton_cli import ProtonCLIError
-from tests.test_session import FakeStore, plain_crypt  # noqa: F401
 
 
 def _ctx(state_context):
@@ -3837,50 +3898,27 @@ def test_fetch_moves_files_to_display_paths_and_marks_vanished(state_context):
     assert statuses == {"/docs/réport.txt": "FETCHED", "/docs/gone.txt": "VANISHED"}
 
 
-def test_verify_records_hashes_and_rejects_mismatch(state_context):
+def test_verify_records_hashes_and_skips_a_mismatch(state_context):
+    ctx = _ctx(state_context)
+    files = {"/a.txt": b"hello", "/Docs/b.txt": b"world"}
+    batch_id = _batch(ctx, files)
+    batch.fetch(ctx, FakeRclone(files), batch_id)
+    (ctx.paths.staging / "Docs" / "b.txt").write_bytes(b"edited mid-run")
+    counts = batch.verify(ctx, batch_id)
+    assert counts == {"verified": 1, "bytes": 5, "hash_mismatch": 1}
+    rows = {r["path_lower"]: r for r in batch.items(ctx, batch_id)}
+    assert rows["/a.txt"]["status"] == "VERIFIED" and rows["/a.txt"]["sha1"] == hashlib.sha1(b"hello").hexdigest()
+    assert rows["/docs/b.txt"]["status"] == "HASH_MISMATCH"
+    assert not (ctx.paths.staging / "Docs").exists()  # wrong bytes never reach the upload
+
+
+def test_verify_fails_batch_when_every_file_mismatches(state_context):
     ctx = _ctx(state_context)
     batch_id = _batch(ctx, {"/a.txt": b"hello"})
     batch.fetch(ctx, FakeRclone({"/a.txt": b"hello"}), batch_id)
-    counts = batch.verify(ctx, batch_id)
-    assert counts == {"verified": 1, "bytes": 5}
-    row = batch.items(ctx, batch_id)[0]
-    assert row["status"] == "VERIFIED" and row["sha1"] == hashlib.sha1(b"hello").hexdigest()
     (ctx.paths.staging / "a.txt").write_bytes(b"tampered")
-    with ctx.state.connection:
-        ctx.state.connection.execute("UPDATE batch_items SET status='FETCHED'")
     with pytest.raises(PhaseError, match="content hash"):
         batch.verify(ctx, batch_id)
-
-
-class FakeProton:
-    def __init__(self, listings: dict[str, list[dict]], downloads: dict[str, bytes], fail_list=()):
-        self.listings = listings
-        self.downloads = downloads
-        self.fail_list = set(fail_list)
-        self.uploads = []
-        self.downloaded = []
-
-    def root_uid(self, phase):
-        return "uid-destination"
-
-    def upload_tree(self, sources, destination, phase):
-        self.uploads.append(([str(s) for s in sources], destination))
-        return '{"ok":true}'
-
-    def list_folder(self, path, phase):
-        if path in self.fail_list:
-            raise ProtonCLIError("EXIT_1")
-        return self.listings[path]
-
-    def download_file(self, remote_path, local_parent: Path, phase):
-        self.downloaded.append(remote_path)
-        local_parent.mkdir(parents=True, exist_ok=True)
-        (local_parent / "file").write_bytes(self.downloads[remote_path])
-
-
-def _node(uid, name, size, sha1, kind="file"):
-    return {"uid": uid, "name": {"ok": True, "value": name}, "type": kind,
-            "activeRevision": {"claimedSize": size, "claimedDigests": {"sha1": sha1, "sha1Verified": True}}}
 
 
 def test_upload_passes_top_level_children(state_context):
@@ -3903,7 +3941,7 @@ def test_confirm_matches_name_size_sha1_and_records_uid(state_context):
     batch.verify(ctx, batch_id)
     sha_a = hashlib.sha1(b"aa").hexdigest()
     proton = FakeProton({"/my-files/Dropbox/Docs": [
-        _node("u-a", "a.txt", 2, sha_a), _node("u-bad", "bad.txt", 2, "0000"),
+        proton_node("u-a", "a.txt", 2, sha_a), proton_node("u-bad", "bad.txt", 2, "0000"),
     ]}, {})
     counts = batch.confirm(ctx, proton, batch_id)
     assert counts == {"confirmed": 1, "confirm_failed": 2}
@@ -3923,7 +3961,7 @@ def test_confirm_uses_uid_path_for_duplicate_names_and_listing_failure(state_con
     batch.fetch(ctx, FakeRclone(files), batch_id)
     batch.verify(ctx, batch_id)
     sha_x = hashlib.sha1(b"x").hexdigest()
-    proton = FakeProton({"/my-files/Dropbox/D": [_node("u1", "x.txt", 1, sha_x), _node("u2", "x.txt", 9, "zz")]},
+    proton = FakeProton({"/my-files/Dropbox/D": [proton_node("u1", "x.txt", 1, sha_x), proton_node("u2", "x.txt", 9, "zz")]},
                         {}, fail_list=["/my-files/Dropbox/E"])
     counts = batch.confirm(ctx, proton, batch_id)
     rows = {r["path_lower"]: r for r in batch.items(ctx, batch_id)}
@@ -3939,8 +3977,8 @@ def test_roundtrip_compares_bytes(state_context):
     batch.fetch(ctx, FakeRclone(files), batch_id)
     batch.verify(ctx, batch_id)
     proton = FakeProton({"/my-files/Dropbox": [
-        _node("ua", "a.txt", 4, hashlib.sha1(b"same").hexdigest()),
-        _node("ub", "b.txt", 4, hashlib.sha1(b"orig").hexdigest()),
+        proton_node("ua", "a.txt", 4, hashlib.sha1(b"same").hexdigest()),
+        proton_node("ub", "b.txt", 4, hashlib.sha1(b"orig").hexdigest()),
     ]}, {"/my-files/Dropbox/a.txt": b"same", "/my-files/Dropbox/b.txt": b"diff"})
     batch.confirm(ctx, proton, batch_id)
     counts = batch.roundtrip(ctx, proton, batch_id)
@@ -3957,8 +3995,8 @@ def test_checkpoint_merges_only_verified_rows_and_pushes(state_context, plain_cr
     batch.fetch(ctx, FakeRclone(files), batch_id)
     batch.verify(ctx, batch_id)
     proton = FakeProton({"/my-files/Dropbox": [
-        _node("ua", "a.txt", 4, hashlib.sha1(b"same").hexdigest()),
-        _node("ub", "b.txt", 4, hashlib.sha1(b"orig").hexdigest()),
+        proton_node("ua", "a.txt", 4, hashlib.sha1(b"same").hexdigest()),
+        proton_node("ub", "b.txt", 4, hashlib.sha1(b"orig").hexdigest()),
     ]}, {"/my-files/Dropbox/a.txt": b"same", "/my-files/Dropbox/b.txt": b"diff"})
     batch.confirm(ctx, proton, batch_id)
     batch.roundtrip(ctx, proton, batch_id)
@@ -4091,17 +4129,27 @@ def fetch(ctx: PhaseContext, rclone: Any, batch_id: int) -> dict[str, int]:
 
 
 def verify(ctx: PhaseContext, batch_id: int) -> dict[str, int]:
-    verified = 0
-    total = 0
-    for row in items(ctx, batch_id, "FETCHED"):
-        hashes = hash_file(local_path(ctx.paths, str(row["path_display"])))
+    """A mismatch is a file edited between listing and fetch: removed from staging so the
+    upload never sees it, counted, never recorded; the next listing catches it. Every
+    file mismatching is corruption, not editing, and fails the batch."""
+    counts: Counter[str] = Counter()
+    rows = items(ctx, batch_id, "FETCHED")
+    for row in rows:
+        staged = local_path(ctx.paths, str(row["path_display"]))
+        hashes = hash_file(staged)
         if hashes.size != int(row["size"]) or hashes.dropbox_content_hash != str(row["content_hash"]):
-            raise PhaseError("content hash mismatch between listing and staged file")
+            staged.unlink()
+            _set_item(ctx, batch_id, row["path_lower"], "HASH_MISMATCH", details_json=_details("content_hash"))
+            counts["hash_mismatch"] += 1
+            continue
         _set_item(ctx, batch_id, row["path_lower"], "VERIFIED", sha1=hashes.sha1, sha256=hashes.sha256)
-        verified += 1
-        total += hashes.size
-    ctx.logger.info(PHASE, "verify", "batch verified", batch=batch_id, verified=verified, bytes=total)
-    return {"verified": verified, "bytes": total}
+        counts["verified"] += 1
+        counts["bytes"] += hashes.size
+    _prune_empty_dirs(ctx.paths.staging)
+    if rows and counts["hash_mismatch"] == len(rows):
+        raise PhaseError("content hash mismatch on every staged file; the fetch path is corrupt")
+    ctx.logger.info(PHASE, "verify", "batch verified", batch=batch_id, **counts)
+    return {"verified": counts["verified"], "bytes": counts["bytes"], "hash_mismatch": counts["hash_mismatch"]}
 
 
 def upload(ctx: PhaseContext, proton: Any, batch_id: int) -> dict[str, int]:
@@ -4235,7 +4283,7 @@ def checkpoint(ctx: PhaseContext, store: Store, batch_id: int) -> dict[str, int]
 - [ ] **Step 4: Run tests**
 
 Run: `task test -- tests/test_batch.py`
-Expected: PASS (8 tests).
+Expected: PASS (9 tests).
 
 - [ ] **Step 5: Commit**
 
@@ -4524,8 +4572,7 @@ import pytest
 
 from migrator.phases import p50_trash
 from migrator.phases.base import PhaseContext
-from tests.test_batch import FakeProton, _node
-from tests.test_session import FakeStore, plain_crypt  # noqa: F401
+from conftest import FakeProton, FakeStore, proton_node
 
 
 def _ctx(state_context, apply=True, remaining=0):
@@ -4557,8 +4604,8 @@ def test_trash_groups_by_parent_and_drops_state_rows(state_context, monkeypatch,
     ctx = _ctx(state_context)
     _deleted(ctx, ["/Docs/a.txt", "/Docs/b.txt", "/Other/c.txt", "/Docs/never-there.txt"])
     proton = FakeProton({
-        "/my-files/Dropbox/Docs": [_node("ua", "a.txt", 1, "s"), _node("ub", "b.txt", 1, "s")],
-        "/my-files/Dropbox/Other": [_node("uc", "c.txt", 1, "s")],
+        "/my-files/Dropbox/Docs": [proton_node("ua", "a.txt", 1, "s"), proton_node("ub", "b.txt", 1, "s")],
+        "/my-files/Dropbox/Other": [proton_node("uc", "c.txt", 1, "s")],
     }, {})
     proton.trashed = []
     proton.trash = lambda paths, phase: proton.trashed.append(sorted(paths))
@@ -4733,8 +4780,8 @@ from __future__ import annotations
 from migrator.filesystem import comparison_key
 from migrator.phases import p60_reconcile
 from migrator.phases.base import PhaseContext
-from tests.test_inventory import _seed_api_inventory
-from tests.test_session import FakeStore, plain_crypt  # noqa: F401
+from conftest import seed_api_inventory
+from conftest import FakeStore
 
 
 def _ctx(state_context, reconcile=True, remaining=0):
@@ -4772,7 +4819,7 @@ def _mirror(state, rows):
 
 def test_reconcile_drops_missing_or_missized_and_trashes_strays(state_context, monkeypatch, plain_crypt):
     ctx = _ctx(state_context)
-    inventory_id = _seed_api_inventory(ctx.state, "run:1", [("/Keep/ok.txt", 3, "h", 1, "file"),
+    inventory_id = seed_api_inventory(ctx.state, "run:1", [("/Keep/ok.txt", 3, "h", 1, "file"),
                                                             ("/Keep/pending.txt", 7, "h", 1, "file")])
     ctx.state.update_run(ctx.run_id, inventory_id=inventory_id)
     _mirror(ctx.state, [("/Keep/ok.txt", 3, None), ("/Keep/lost.txt", 2, "u-lost"), ("/Keep/bad.txt", 5, "u-bad")])
@@ -4926,7 +4973,7 @@ import json
 
 from migrator.phases import p70_report
 from migrator.phases.base import PhaseContext
-from tests.test_session import FakeStore, plain_crypt  # noqa: F401
+from conftest import FakeStore
 
 
 def _ctx(state_context):
@@ -5154,6 +5201,7 @@ def figures(ctx: PhaseContext) -> dict[str, Any]:
             "batches_completed": len(details),
             "files_fetched": _sum(details, "fetched"),
             "files_vanished": _sum(details, "vanished"),
+            "files_hash_mismatched": _sum(details, "hash_mismatch"),
             "files_uploaded": _sum(details, "uploaded_files"),
             "bytes_uploaded": moved_bytes,
             "files_confirmed": _sum(details, "confirmed"),
@@ -5743,4 +5791,4 @@ The first dispatched run answers the spec's open unknowns; record each answer in
 2. Whether Proton challenges the refresh call from Azure egress (spec risk 4).
 3. The real per-batch duration, which sets whether `batch_gb=4` and `run_budget_minutes=165` stay.
 4. That `.run/chain` triggers the next run and the concurrency group queues it.
-5. Seconds per file in `roundtrip_seconds` against the batch's file count: the CLI is spawned once per round-tripped file. `BATCH_FILES` in `p30_plan.py` is 5,000, which needs under about 1.8 s per file to finish inside `RUN_BUDGET_MIN`; if the first batch is killed by the job timeout before it checkpoints, lower the cap before the next dispatch (the run would otherwise repeat that batch every night), and if the cost is seconds per file build the recursive folder download from the review notes.
+5. Seconds per file in `roundtrip_seconds` against the batch's file count: the CLI is spawned once per round-tripped file. `batch_files` in `config/mirror.toml` is 5,000, which needs under about 1.8 s per file to finish inside `RUN_BUDGET_MIN`; if the first batch is killed by the job timeout before it checkpoints, lower the cap before the next dispatch (the run would otherwise repeat that batch every night), and if the cost is seconds per file build the recursive folder download from the review notes.
