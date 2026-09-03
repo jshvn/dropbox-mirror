@@ -19,7 +19,7 @@
 - Intentional shortcuts carry a `ponytail:` comment naming the ceiling and the upgrade path.
 - Logs and the step summary carry counts, never mirrored path names (spec section 7). Console output never prints an object identifier.
 - Secrets reach processes by environment variable name only, resolved from 1Password at run time; `op.env` holds `op://` references and is committed.
-- `AWS_REGION`-style literals such as `RCLONE_CONFIG_R2_REGION=auto` are Taskfile literals, never secrets.
+- `AWS_REGION`-style literals such as `RCLONE_CONFIG_R2_REGION=auto` are `ENV` lines in the Dockerfile, never secrets; they reach every process in the toolbox whether or not `task` wraps it.
 - The pipeline is plan-by-default: `batches`, `trash`, `reconcile`, `empty-trash` mutate only with `--apply`.
 - Every mutation is confirmed by independent observation; a command exit status is never evidence.
 - Non-trivial logic leaves one runnable check behind (pytest, no fixtures beyond `conftest.py`).
@@ -33,6 +33,50 @@
 - **The image holds toolchain only; the code is bind-mounted at `/work`** with `PYTHONPATH=/work/src`. Code edits never require an image rebuild.
 - **`empty_trash` is not a workflow input.** A permanent deletion behind a checkbox with no confirmation is a footgun; `task empty-trash` runs it from a laptop with a prompt.
 - **The `confirm` step lists each batch parent folder** and matches name, size, and SHA-1 instead of parsing the upload JSON summary, whose exact shape is unverified. This also yields the UIDs that `mirror_objects` and the round-trip need. The raw upload stdout is still stored in `commands`.
+- **Non-secret rclone remote literals are Dockerfile `ENV`, not Taskfile `env:`.** Several operator tasks and the workflow's failure path run `python -m migrator` in the toolbox without an inner `task`, and a Taskfile `env:` never reaches those.
+- **The nightly Proton touch is `root_uid` at the top of `batches`, unconditional.** The spec puts a cheap listing in the `session` step; that step runs before the state exists, so the CLI call could not be recorded as evidence. `root_uid` is a listing, it is the first CLI call of the run, and its `after_call` writes the session back.
+- **Reconcile is the first run of the configured UTC weekday, not a run in a configured hour.** The dispatch fires at 02:10, chained runs start at any hour, and a queued run starts whenever the previous one ends; an hour key either never matches or matches several chained runs in a row.
+- **`report` pushes the state under `--apply`.** The run row, its figures event and the final status only exist on the runner until something uploads them; without this push `task status` and the trend queries would never see a finished run.
+- **Not computed:** files skipped as SHA-1 identical (that needs the unverified upload JSON) and batches repeated from a killed run (a new run re-plans from the state, so the repeat is invisible; the INTERRUPTED run row is the evidence).
+- **Retention.** Every checkpoint ships the whole database to R2, so the listing tables keep the newest two Dropbox inventories, PLANNED batches from earlier runs are deleted at plan time, and the Proton snapshot table keeps one walk.
+
+## Review notes, 2026-09-03
+
+An adversarial pass over the first draft. Everything under "changed" is edited into the tasks below; everything under "not changed" is for the author and the implementor to weigh.
+
+Changed inline:
+
+1. A quiet night made no Proton call (`root_uid` ran only when batches were planned), so the session never refreshed and the 60-day idle expiry stayed live. Task 14 calls it unconditionally.
+2. The reconcile rule keyed on `hour_utc = 3` while the dispatch is `10 2 * * *`: the weekly reconcile could never fire from a scheduled run. Tasks 3 and 9 key it on the first run of the configured weekday, read from the `runs` table.
+3. The run's final status and figures never reached R2. Task 17 pushes under `--apply`; Task 18 gives `pipeline` the `--apply` and `plan-pipeline` a plain `report`.
+4. `task status` started a run row in the R2 state, which showed itself as the last run and would have masked the reconcile day. Task 9 makes `status` fetch the state itself and start nothing.
+5. `python -m migrator ping --fail` cannot parse: `args` is a `nargs="*"` positional and argparse rejects a `--flag`. It is `ping fail` now (Tasks 9, 18, 19).
+6. `task empty-trash`, `task state-rollback`, `task session-seal` and the workflow's failure step ran `python -m migrator` directly in the container, without the Taskfile `env:` that held the rclone remote literals, so rclone had no `r2` remote. The literals moved to the Dockerfile (Task 2); the failure path goes through inner tasks (Task 19); `empty-trash` has an inner pipeline task (Task 18).
+7. `PROTON_DRIVE_CACHE_DIR` was a fixed image path while `WorkPaths.session` follows `MIRROR_WORK_DIR`. Task 5 sets it from `paths.session` in `run_phase`.
+8. `_mismatch` in `confirm` read `claimedSize` through `or -1`, so every empty file failed confirmation as a size mismatch (Task 13).
+9. `fetch` marked every row VANISHED if rclone wrote display-cased names, and the batch then checkpointed as an empty success. Task 13 accepts either spelling and refuses a batch where rclone exited 0 yet nothing reached staging.
+10. A transient failure listing one Proton folder in `trash` recorded its files NOT_FOUND and dropped them from the state while they stayed in Proton. Task 15 records LISTING_FAILED and keeps those rows for the next night.
+11. Reconcile compared `comparison_key("/Keep/ok.txt")` against `comparison_key("Keep/ok.txt")`; Task 16 strips the leading slash.
+12. A wrong bucket name or credential read as "fresh" (rclone's not-found exit on both probes). Task 8 adds `Store.probe()`, required before "fresh" is accepted.
+13. State growth: every run appended a full Dropbox listing (`dropbox_objects` with `raw_json`) and a full re-plan (`batches`, `batch_items`) and never pruned, while every checkpoint ships the whole file. Tasks 10, 12 and 16 prune (see Retention above).
+14. `checkpoint` uploaded the same blob twice; Task 8 puts the history object and server-side copies it to the canonical key. History labels use the run's start epoch (spec 5.2) instead of `runs.id`, which a rollback can re-issue.
+15. `VACUUM INTO` fails inside an open transaction; `snapshot_to` commits first (Task 4).
+16. The Proton CLI exits 1 when any single item fails; `upload_tree` raised on that before `confirm` could adjudicate per file. Task 7 accepts exit 1 for upload; an AUTH category still raises.
+17. `main()` caught four exception classes and let the rest print a traceback, provider stderr included, to CI logs; it now catches every exception (Task 5). The batch loop marks the batch FAILED on any exception, not only `PhaseError` (Task 14).
+18. `report` returned PASS for a FAIL run, so `pipeline` went on to ping success. It returns the run status now (Task 17), and the workflow's single `always()` step publishes the summary and pings `/fail` unless the job succeeded (Task 19).
+19. Report throttling and error counts were all-time; they are scoped to the run's `started_at` (Task 17).
+20. Files listed as downloadable but without `content_hash` were silently never mirrored and never counted; Task 10 reclassifies them as non-downloadable in the listing.
+21. Batches are capped at 5,000 files as well as `BATCH_GB` (Task 12); see finding A.
+
+Not changed:
+
+- **A. Round-trip cost is per file, not per byte.** `roundtrip` spawns one `proton-drive filesystem download` per file. The Bun binary's start-up plus one authenticated request is seconds per file, so a batch of small files is bounded by count. The tree holds 200k to 300k files, mostly images and text, so the seed's round-trip time is that count times the per-file cost whatever the cap; the cap only decides whether one batch fits inside one run. At 5,000 files a batch needs the per-file cost under about 1.8 s to finish inside `RUN_BUDGET_MIN`, and the budget check runs before a batch starts, not during it: a batch that cannot finish is killed by the job timeout before it checkpoints, and the next run repeats it, forever. The spec's "every file, every run, no sampling" stands; the cap keeps a batch inside the budget only if the measured cost allows. The upgrade path is a recursive folder download when a batch covers a whole folder. `roundtrip_seconds` on the first runs decides.
+- **B. `verify` fails the whole run on one content-hash mismatch**, as spec 5.1 says. A file being edited during the run window does that every night it happens. Skipping the item the way VANISHED is skipped (counted, never entering the state, caught by the next listing) is the same amount of code and meets the spec's actual goal, which is that wrong bytes are never recorded.
+- **C. Donor DDL and signatures were written from memory of `cfd0e57`.** Column names in the seed helpers (`dropbox_objects`, `dropbox_inventory_runs`, `dropbox_pages`, `rclone_*`, `proton_nodes`, `proton_folders`, `events`, `commands`), `start_phase`'s keyword set (`tool_versions` in Task 4's test, `command_parameters` in Task 5's runner), `record_artifact`, the `walk_tree` item attributes, and whether `validate_dropbox_scope("")` accepts the whole-Dropbox root all need checking against the checkout; Task 4 step 5 says where.
+- **D. Shared test helpers** (`FakeStore`, `plain_crypt`, `FakeProton`, `_node`, `_seed_api_inventory`) are imported across `test_*.py` files; the global constraint says fixtures live in `conftest.py`. Moving them is mechanical and belongs to the first importing task (8).
+- **E. The toolbox image is rebuilt from upstream downloads on every CI run.** A proton.me or GitHub release outage fails the night, which silence-is-the-alert tolerates; publishing the image to GHCR is the fix if it bites.
+- **F. Runtime preflight of binary versions** (spec section 8) happens only at image build. `provider.version()` at the top of `batches` is the addition if a mounted binary ever matters.
+- **G. Case-only renames in Dropbox** (`Report.pdf` to `report.pdf`) produce no delta and leave Proton's name unchanged, because the key is `path_lower`.
 
 ---
 
@@ -100,7 +144,7 @@ Work directory at run time (`MIRROR_WORK_DIR`, default `.run/`, git-excluded):
 `logs/`, `rclone.conf` (empty file rclone may write to), `report.md`, `chain` (marker),
 `age.key` (transient, 0600).
 
-R2 keys: `.state/state.sqlite.xz.age`, `.state/history/<run>-<batch>.sqlite.xz.age`,
+R2 keys: `.state/state.sqlite.xz.age`, `.state/history/<epoch>-<label>.sqlite.xz.age` (label: batch number, `trash`, `reconcile`, `report`),
 `.state/session.tar.age`.
 
 ## Shared interfaces (every task consumes these names exactly)
@@ -166,6 +210,7 @@ class Store:
     def put(self, source: Path, key: str) -> None
     def copy(self, source_key: str, target_key: str) -> None
     def list(self, prefix: str) -> list[str]
+    def probe(self) -> None                       # raises StoreError unless the bucket lists
 
 # migrator.crypt
 def recipient(identity: str, key_file: Path, *, run=subprocess.run) -> str
@@ -208,9 +253,9 @@ run_phase(command: str, *, apply: bool, runtime: Runtime) -> str
 
 State tables added to the donor schema (Task 4 has the DDL):
 `runs`, `mirror_objects`, `delta_changed`, `delta_deleted`, `batches`, `batch_items`, `deletions`.
-Statuses: `batches.status` in PLANNED, FETCHED, VERIFIED, UPLOADED, CONFIRMED, ROUNDTRIPPED,
-CHECKPOINTED, FAILED; `batch_items.status` in PLANNED, VANISHED, FETCHED, VERIFIED,
-CONFIRMED, CONFIRM_FAILED, ROUNDTRIP_OK, ROUNDTRIP_MISMATCH, CHECKPOINTED.
+Statuses: `batches.status` in PLANNED, CHECKPOINTED, FAILED; `batch_items.status` in PLANNED,
+VANISHED, FETCHED, VERIFIED, CONFIRMED, CONFIRM_FAILED, ROUNDTRIP_OK, ROUNDTRIP_MISMATCH,
+CHECKPOINTED; `deletions.status` in TRASHED, NOT_FOUND, LISTING_FAILED.
 
 ---
 
@@ -480,6 +525,15 @@ ENV PYTHONUNBUFFERED=1 \
     PROTON_DRIVE_CREDENTIALS_STORE=unsafe_file \
     PROTON_DRIVE_CACHE_DIR=/work/.run/session \
     PROTON_DRIVE_LOG_LEVEL=INFO
+# Non-secret rclone remote literals. They live here, not in the Taskfile, so that every
+# command in the toolbox sees them whether or not an inner `task` wraps it. Credentials
+# for both remotes arrive by name from 1Password (op.env). Never secrets: `op run`
+# masks every value it resolves, and masking "auto" would corrupt ordinary output.
+ENV RCLONE_CONFIG_DROPBOX_TYPE=dropbox \
+    RCLONE_CONFIG_R2_TYPE=s3 \
+    RCLONE_CONFIG_R2_PROVIDER=Cloudflare \
+    RCLONE_CONFIG_R2_REGION=auto \
+    RCLONE_CONFIG_R2_NO_CHECK_BUCKET=true
 WORKDIR /work
 ```
 
@@ -643,7 +697,7 @@ def test_defaults_and_derived_bytes(tmp_path):
     assert cfg.budget.run_budget_minutes == 165
     assert cfg.budget.ceiling_gb == 4000
     assert cfg.proton.destination == "/my-files/Dropbox"
-    assert cfg.reconcile.weekday == 0 and cfg.reconcile.hour_utc == 3
+    assert cfg.reconcile.weekday == 0
 
 
 def test_unknown_key_rejected(tmp_path):
@@ -668,8 +722,8 @@ def test_numeric_floors(tmp_path):
         load_config(_write(tmp_path, GOOD + "\n[budget]\nbatch_gb = 0\n"))
     with pytest.raises(ConfigError, match="listing_floor_ratio"):
         load_config(_write(tmp_path, GOOD + "\n[budget]\nlisting_floor_ratio = 1.5\n"))
-    with pytest.raises(ConfigError, match="hour_utc"):
-        load_config(_write(tmp_path, GOOD + "\n[reconcile]\nhour_utc = 24\n"))
+    with pytest.raises(ConfigError, match="weekday"):
+        load_config(_write(tmp_path, GOOD + "\n[reconcile]\nweekday = 7\n"))
 ```
 
 - [ ] **Step 2: Run to verify failure**
@@ -750,8 +804,7 @@ class Budget:
 
 @dataclass(frozen=True)
 class Reconcile:
-    weekday: int = 0
-    hour_utc: int = 3
+    weekday: int = 0  # the first run that starts on this UTC weekday walks Proton
 
 
 @dataclass(frozen=True)
@@ -838,8 +891,6 @@ def validate_config(cfg: Config) -> None:
         raise ConfigError("budget.listing_floor_ratio must be in (0, 1]")
     if type(cfg.reconcile.weekday) is not int or not 0 <= cfg.reconcile.weekday <= 6:
         raise ConfigError("reconcile.weekday must be 0 (Monday) to 6 (Sunday)")
-    if type(cfg.reconcile.hour_utc) is not int or not 0 <= cfg.reconcile.hour_utc <= 23:
-        raise ConfigError("reconcile.hour_utc must be 0..23")
 ```
 
 Imports at the top: `re`, `tomllib`, `dataclass`, `fields`, `isfinite`, `Path`, `Any`, `TypeVar`, `get_type_hints`, and from `.guards`: `GuardError`, `validate_dropbox_scope`, `validate_executable`, `validate_proton_cli_path`.
@@ -876,7 +927,6 @@ listing_floor_ratio = 0.5
 
 [reconcile]
 weekday = 0
-hour_utc = 3
 ```
 
 - [ ] **Step 5: Run tests**
@@ -1409,8 +1459,11 @@ CREATE TABLE IF NOT EXISTS deletions (
     def snapshot_to(self, target: Path) -> None:
         if target.exists():
             target.unlink()
+        self.connection.commit()  # VACUUM refuses to run inside an open transaction
         self.connection.execute("VACUUM INTO ?", (str(target),))
 ```
+
+8. Dump the donor DDL the later tasks lean on and reconcile the plan against it now, not when a test fails with `OperationalError`: `python -c "from migrator.state import SCHEMA; print(SCHEMA)"` and read the columns of `dropbox_inventory_runs`, `dropbox_pages`, `dropbox_objects`, `rclone_inventory_runs`, `rclone_folders`, `rclone_objects`, `proton_snapshots`, `proton_folders`, `proton_nodes`, `events`, `commands`, `phase_runs`. Then check `start_phase`'s keyword arguments (this plan uses both `tool_versions` and `command_parameters`), `record_artifact`'s signature, and the attributes of the items `filesystem.walk_tree` yields. Every seed helper and query in Tasks 10 through 17 was written from memory of the donor; fix the plan text where it differs before those tasks run.
 
 - [ ] **Step 6: Run tests**
 
@@ -1575,6 +1628,7 @@ class PhaseContext:
 ```python
 from __future__ import annotations
 
+import os
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -1603,6 +1657,9 @@ def run_phase(command: str, *, apply: bool, runtime: Runtime) -> str:
     cfg = load_config(runtime.config_path)
     paths = WorkPaths.from_runtime(runtime)
     paths.ensure()
+    # The CLI's cache dir must follow MIRROR_WORK_DIR, not the image default.
+    os.environ["PROTON_DRIVE_CACHE_DIR"] = str(paths.session)
+    os.environ["PROTON_DRIVE_CREDENTIALS_STORE"] = "unsafe_file"
     state = State(paths.state_db, cfg.mirror.id)
     try:
         state.initialize_migration(cfg.source_file, cfg.source_sha256)
@@ -1643,9 +1700,7 @@ from __future__ import annotations
 import argparse
 import sys
 
-from .config import ConfigError
 from .env import Runtime
-from .phases.base import PhaseError
 from .runner import PHASES, run_phase
 
 # Pre-state and utility commands register here in later tasks: {name: callable(runtime, args)}
@@ -1673,7 +1728,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"{args.command}: {status}")
             return 0 if status in {"PASS", "PLANNED"} else 2
         return int(COMMANDS[args.command](runtime, args.args))  # type: ignore[operator]
-    except (ConfigError, PhaseError, RuntimeError, ValueError) as exc:
+    except Exception as exc:  # noqa: BLE001 - every class: a traceback would print provider stderr
         # Error text may carry provider stderr with path names; CI sees the class only.
         detail = f": {exc}" if runtime.verbose else ""
         print(f"ERROR: {type(exc).__name__}{detail}", file=sys.stderr)
@@ -2091,7 +2146,7 @@ Copy `$DONOR/src/migrator/providers/proton_cli.py`, then:
             "-f", "create-new-revision", "-d", "merge", "--json", "--skip-thumbnails",
             *(str(source) for source in sources), destination,
         ]
-        return self._mutation("upload", argv, phase)
+        return self._mutation("upload", argv, phase, accepted=frozenset({0, 1}))
 
     def trash(self, cli_paths: list[str], phase: str) -> None:
         if not cli_paths:
@@ -2104,7 +2159,7 @@ Copy `$DONOR/src/migrator/providers/proton_cli.py`, then:
 
 Spec section 5.1 lists a `-t` flag for upload; the CLI's `--help` decides whether `-t` is a separate flag or the short form of `--skip-thumbnails`. Bootstrap step 3 in the README (Task 20) records the verified invocation; until then the argv above is the one under test. Also unverified: whether one invocation accepts several local sources. `ponytail:` if it does not, `upload_tree` loops one `_mutation` per source; the confirm step is unaffected.
 
-4. `_mutation` returns `result.stdout` (change the signature to `-> str` and `return result.stdout` after the success branch). Its `timeout` uses `transfer_timeout_seconds` for `upload` and `command_timeout_seconds` otherwise (already so).
+4. `_mutation` returns `result.stdout` (change the signature to `-> str` and `return result.stdout` after the success branch). Its `timeout` uses `transfer_timeout_seconds` for `upload` and `command_timeout_seconds` otherwise (already so). Add a keyword `accepted: frozenset[int] = frozenset({0})` and treat any exit code in it as success; `upload_tree` passes `frozenset({0, 1})` because the CLI exits 1 when any single item failed and `confirm` adjudicates per file from the listing. An AUTH category (`login first`) raises whatever the exit code.
 
 5. In `inventory`, the child path expression `component = uid if name in duplicates else escape_component(name)` / `node_cli_path = ...` becomes `node_cli_path = child_cli_path(cli_path, name, uid, name in duplicates)`, with the module-level function:
 
@@ -2205,6 +2260,15 @@ def test_list_of_absent_prefix_is_empty(runtime_factory, tmp_path):
     assert Store(runtime, paths, run=run).list(".state/history/") == []
 
 
+def test_probe_raises_when_bucket_unreachable(runtime_factory, tmp_path):
+    runtime = runtime_factory(tmp_path)
+    paths = WorkPaths.from_runtime(runtime)
+    paths.ensure()
+    run, _ = _fake([(3, "", "NoSuchBucket")])
+    with pytest.raises(StoreError, match="reachable"):
+        Store(runtime, paths, run=run).probe()
+
+
 def test_bucket_required(runtime_factory, tmp_path):
     runtime = runtime_factory(tmp_path, MIRROR_R2_BUCKET="")
     with pytest.raises(StoreError, match="MIRROR_R2_BUCKET"):
@@ -2245,6 +2309,9 @@ class FakeStore:
 
     def list(self, prefix):
         return sorted(k for k in self.objects if k.startswith(prefix))
+
+    def probe(self):
+        pass
 
 
 @pytest.fixture
@@ -2438,6 +2505,14 @@ class Store:
         except ValueError as exc:
             raise StoreError("rclone lsjson returned invalid JSON") from exc
         return sorted(prefix + str(entry["Path"]) for entry in entries if not entry.get("IsDir"))
+
+    def probe(self) -> None:
+        """Fail unless the bucket answers a listing. rclone reports a wrong bucket name or a
+        rejected credential with the same not-found exit as a missing key, and that must
+        never read as an empty mirror."""
+        result = self._rclone("lsjson", self._remote(""))
+        if result.returncode:
+            raise StoreError(f"R2 bucket is not reachable: rclone exit {result.returncode}")
 ```
 
 - [ ] **Step 4: Write crypt.py**
@@ -2617,6 +2692,7 @@ def fetch(runtime: Runtime, paths: WorkPaths, store: Store) -> str:
                     "state object is missing but history exists; a lost state must never "
                     "be mistaken for an empty mirror. Roll back with `task state-rollback`."
                 )
+            store.probe()  # "fresh" is only believable from a bucket that answers
             return "fresh"
         compressed = paths.root / "state.sqlite.xz"
         try:
@@ -2639,8 +2715,9 @@ def push(state: State, runtime: Runtime, paths: WorkPaths, store: Store, label: 
         with open(snapshot, "rb") as source, lzma.open(compressed, "wb", preset=6) as target:
             target.write(source.read())
         crypt.encrypt(runtime.age_identity, paths.age_key, compressed, encrypted)
-        store.put(encrypted, f"{HISTORY_PREFIX}{label}.sqlite.xz.age")
-        store.put(encrypted, STATE_KEY)
+        history_key = f"{HISTORY_PREFIX}{label}.sqlite.xz.age"
+        store.put(encrypted, history_key)
+        store.copy(history_key, STATE_KEY)  # server-side; the blob crosses the wire once
     finally:
         for path in (snapshot, compressed, encrypted):
             path.unlink(missing_ok=True)
@@ -2655,7 +2732,7 @@ def rollback(store: Store, history_key: str) -> None:
 - [ ] **Step 7: Run tests**
 
 Run: `task test -- tests/test_store.py tests/test_session.py tests/test_statefile.py`
-Expected: PASS (12 tests). Also run `task run -- sh -c 'cd /tmp && age-keygen -o k 2>/dev/null && echo hi > p && age -r $(age-keygen -y k) -o p.age p && age -d -i k p.age'` once; expected output `hi`, proving the real binaries behave as the wrappers assume.
+Expected: PASS (13 tests). Also run `task run -- sh -c 'cd /tmp && age-keygen -o k 2>/dev/null && echo hi > p && age -r $(age-keygen -y k) -o p.age p && age -d -i k p.age'` once; expected output `hi`, proving the real binaries behave as the wrappers assume.
 
 - [ ] **Step 8: Commit**
 
@@ -2674,7 +2751,7 @@ git commit -m "feat(r2): encrypted session and state objects with dated history"
 
 **Interfaces:**
 - Consumes: `Runtime`, `WorkPaths`, `Store`, `session`, `statefile`, `State`, `Config`.
-- Produces: `COMMANDS` entries `clock`, `session`, `state`, `ping`, `status`, `state-push`, `state-rollback`, `session-seal`; each is `fn(runtime, args: list[str]) -> int`. `clock` writes `paths.clock` as `{"start_epoch": int, "hour_utc": int, "weekday": int}` and clears `staging/`, `roundtrip/`, `report`, `chain`. `state` fetches the state and starts the run row. `is_reconcile_run(cfg, runtime, hour_utc, weekday) -> bool`.
+- Produces: `COMMANDS` entries `clock`, `session`, `state`, `ping`, `status`, `state-push`, `state-rollback`, `session-seal`; each is `fn(runtime, args: list[str]) -> int`. `clock` writes `paths.clock` as `{"start_epoch": int, "hour_utc": int, "weekday": int}` and clears `staging/`, `roundtrip/`, `report`, `chain`. `state` fetches the state and starts the run row; `status` fetches the state and starts nothing. `is_reconcile_run(cfg, runtime, db, *, start_epoch, weekday) -> bool`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -2732,13 +2809,16 @@ def runtime_factory_override(runtime, **changes):
     return replace(runtime, **changes)
 
 
-def test_is_reconcile_run(config_factory, runtime_factory, tmp_path):
-    cfg = config_factory(tmp_path)  # weekday 0, hour 3
-    runtime = runtime_factory(tmp_path)
-    assert commands.is_reconcile_run(cfg, runtime, hour_utc=3, weekday=0) is True
-    assert commands.is_reconcile_run(cfg, runtime, hour_utc=4, weekday=0) is False
-    forced = runtime_factory(tmp_path, RECONCILE="true")
-    assert commands.is_reconcile_run(cfg, forced, hour_utc=4, weekday=5) is True
+def test_is_reconcile_run_is_first_run_of_the_weekday(state_context):
+    cfg, _, state, _, runtime = state_context  # reconcile.weekday 0
+    monday = 1700438400  # 2023-11-20 00:00:00 UTC, a Monday
+    assert commands.is_reconcile_run(cfg, runtime, state, start_epoch=monday + 3600, weekday=0) is True
+    state.start_run(start_epoch=monday + 3600, hour_utc=1, weekday=0, budget_minutes=1, host="t", reconcile=True)
+    # a chained or queued run later the same day does not walk Proton again
+    assert commands.is_reconcile_run(cfg, runtime, state, start_epoch=monday + 7200, weekday=0) is False
+    assert commands.is_reconcile_run(cfg, runtime, state, start_epoch=monday + 90000, weekday=1) is False
+    forced = runtime_factory_override(runtime, reconcile=True)
+    assert commands.is_reconcile_run(cfg, forced, state, start_epoch=monday + 7200, weekday=0) is True
 
 
 def test_ping_hits_fail_suffix(runtime_factory, tmp_path, monkeypatch):
@@ -2746,13 +2826,14 @@ def test_ping_hits_fail_suffix(runtime_factory, tmp_path, monkeypatch):
     seen = []
     monkeypatch.setattr(commands, "_http_get", lambda url: seen.append(url))
     assert commands.ping(runtime, []) == 0
-    assert commands.ping(runtime, ["--fail"]) == 0
+    assert commands.ping(runtime, ["fail"]) == 0
     assert seen == ["https://hc.example/ping/x", "https://hc.example/ping/x/fail"]
 
 
 def test_status_prints_counts_only(state_context, capsys, monkeypatch):
     cfg, paths, state, _, runtime = state_context
     monkeypatch.setattr(commands, "load_config", lambda _: cfg)
+    monkeypatch.setattr(commands, "_fetch_state", lambda runtime, paths: "restored")
     state.start_run(start_epoch=1, hour_utc=0, weekday=0, budget_minutes=1, host="t", reconcile=False)
     with state.connection:
         state.connection.execute(
@@ -2815,10 +2896,19 @@ def read_clock(paths: WorkPaths) -> dict[str, int]:
     return json.loads(paths.clock.read_text(encoding="utf-8"))
 
 
-def is_reconcile_run(cfg: Config, runtime: Runtime, *, hour_utc: int, weekday: int) -> bool:
-    return runtime.reconcile or (
-        hour_utc == cfg.reconcile.hour_utc and weekday == cfg.reconcile.weekday
-    )
+def is_reconcile_run(cfg: Config, runtime: Runtime, db: State, *, start_epoch: int, weekday: int) -> bool:
+    """RECONCILE=true, or the first run that starts on the configured UTC weekday. Keyed
+    on the day, not an hour: chained and queued runs start at any hour."""
+    if runtime.reconcile:
+        return True
+    if weekday != cfg.reconcile.weekday:
+        return False
+    day_start = start_epoch - start_epoch % 86400
+    earlier = db.connection.execute(
+        "SELECT COUNT(*) FROM runs WHERE start_epoch >= ? AND start_epoch < ?",
+        (day_start, start_epoch),
+    ).fetchone()[0]
+    return int(earlier) == 0
 
 
 def session_restore(runtime: Runtime, args: list[str]) -> int:
@@ -2828,22 +2918,27 @@ def session_restore(runtime: Runtime, args: list[str]) -> int:
     return 0
 
 
-def state(runtime: Runtime, args: list[str]) -> int:
-    cfg = load_config(runtime.config_path)
-    paths = _paths(runtime)
+def _fetch_state(runtime: Runtime, paths: WorkPaths) -> str:
     paths.state_db.unlink(missing_ok=True)
     for suffix in ("-wal", "-shm"):
         Path(str(paths.state_db) + suffix).unlink(missing_ok=True)
-    outcome = statefile.fetch(runtime, paths, Store(runtime, paths))
+    return statefile.fetch(runtime, paths, Store(runtime, paths))
+
+
+def state(runtime: Runtime, args: list[str]) -> int:
+    cfg = load_config(runtime.config_path)
+    paths = _paths(runtime)
+    outcome = _fetch_state(runtime, paths)
     stamp = read_clock(paths)
     db = State(paths.state_db, cfg.mirror.id)
     try:
         db.initialize_migration(cfg.source_file, cfg.source_sha256)
+        # Decided before this run's row exists, so the row itself cannot count as "earlier".
+        reconcile = is_reconcile_run(cfg, runtime, db, start_epoch=stamp["start_epoch"], weekday=stamp["weekday"])
         run_id = db.start_run(
             start_epoch=stamp["start_epoch"], hour_utc=stamp["hour_utc"], weekday=stamp["weekday"],
             budget_minutes=runtime.budget_override or cfg.budget.run_budget_minutes,
-            host=runtime.host,
-            reconcile=is_reconcile_run(cfg, runtime, hour_utc=stamp["hour_utc"], weekday=stamp["weekday"]),
+            host=runtime.host, reconcile=reconcile,
         )
         files, size = db.mirror_totals()
     finally:
@@ -2861,7 +2956,8 @@ def ping(runtime: Runtime, args: list[str]) -> int:
     if not runtime.healthcheck_url:
         print("ping: MIRROR_HEALTHCHECK_URL unset; skipped")
         return 0
-    url = runtime.healthcheck_url.rstrip("/") + ("/fail" if "--fail" in args else "")
+    # A bare word, not a flag: the command's `args` positional rejects anything starting "--".
+    url = runtime.healthcheck_url.rstrip("/") + ("/fail" if "fail" in args else "")
     for _attempt in range(3):
         try:
             _http_get(url)
@@ -2875,6 +2971,7 @@ def ping(runtime: Runtime, args: list[str]) -> int:
 def status(runtime: Runtime, args: list[str]) -> int:
     cfg = load_config(runtime.config_path)
     paths = _paths(runtime)
+    _fetch_state(runtime, paths)  # reads R2 directly and starts no run row
     db = State(paths.state_db, cfg.mirror.id)
     try:
         files, size = db.mirror_totals()
@@ -3025,8 +3122,28 @@ def test_inventory_records_counts_and_run_link(state_context, monkeypatch):
                         lambda self, purpose, reuse_complete=True: inventory_id)
     result = p10_inventory.run(ctx)
     assert result.outputs == {"inventory_id": inventory_id, "files": 1, "folders": 1, "bytes": 3,
-                              "non_downloadable": 1, "observer": False}
+                              "non_downloadable": 1, "observer": False, "unhashed": 0,
+                              "pruned_inventories": 0}
     assert ctx.state.current_run()["inventory_id"] == inventory_id
+
+
+def test_unhashed_files_become_non_downloadable(state_context, monkeypatch):
+    ctx = _ctx(state_context)
+    inventory_id = _seed_api_inventory(ctx.state, "run:1", [("/cloud.gdoc", 0, None, 1, "file"),
+                                                            ("/real.txt", 2, "h", 1, "file")])
+    monkeypatch.setattr(p10_inventory, "access_token", lambda cfg, runtime: "tok")
+    monkeypatch.setattr(p10_inventory.DropboxAPIProvider, "inventory",
+                        lambda self, purpose, reuse_complete=True: inventory_id)
+    outputs = p10_inventory.run(ctx).outputs
+    assert outputs["files"] == 1 and outputs["non_downloadable"] == 1 and outputs["unhashed"] == 1
+
+
+def test_prune_keeps_newest_inventories(state_context):
+    _, _, state, _, _ = state_context
+    ids = [_seed_api_inventory(state, f"run:{n}", [("/a.txt", 1, "h", 1, "file")]) for n in range(4)]
+    assert p10_inventory.prune_inventories(state.connection, keep=2) == 2
+    left = {r["inventory_id"] for r in state.connection.execute("SELECT inventory_id FROM dropbox_objects")}
+    assert left == set(ids[2:])
 
 
 def test_reconcile_run_gates_on_observer(state_context, monkeypatch):
@@ -3077,6 +3194,8 @@ def gate(ctx: PhaseContext, api_id: int, rclone_id: int) -> Counter[str]:
 ```python
 from __future__ import annotations
 
+import sqlite3
+
 from ..providers.dropbox_api import DropboxAPIProvider
 from ..providers.dropbox_auth import access_token
 from ..providers.dropbox_rclone import DropboxRcloneProvider
@@ -3084,6 +3203,25 @@ from . import observer
 from .base import PhaseContext, PhaseResult
 
 PHASE = "10_inventory"
+# inventory-run table -> the tables keyed by its id (column names per the donor DDL, Task 4 step 5)
+_INVENTORY_TABLES = {
+    "dropbox_inventory_runs": ("dropbox_objects", "dropbox_pages"),
+    "rclone_inventory_runs": ("rclone_objects", "rclone_folders"),
+}
+
+
+def prune_inventories(connection: sqlite3.Connection, keep: int = 2) -> int:
+    """Old listings are the bulk of the state, and every checkpoint ships the state to R2."""
+    pruned = 0
+    with connection:
+        for runs_table, child_tables in _INVENTORY_TABLES.items():
+            stale = [(int(r["id"]),) for r in connection.execute(
+                f"SELECT id FROM {runs_table} ORDER BY id DESC LIMIT -1 OFFSET ?", (keep,))]
+            for table in child_tables:
+                connection.executemany(f"DELETE FROM {table} WHERE inventory_id=?", stale)
+            connection.executemany(f"DELETE FROM {runs_table} WHERE id=?", stale)
+            pruned += len(stale)
+    return pruned
 
 
 def run(ctx: PhaseContext) -> PhaseResult:
@@ -3092,6 +3230,15 @@ def run(ctx: PhaseContext) -> PhaseResult:
     token = access_token(ctx.cfg, ctx.runtime)
     api = DropboxAPIProvider(ctx.cfg, ctx.state, ctx.logger, token=token)
     inventory_id = api.inventory(purpose, reuse_complete=True)
+    with ctx.state.connection:
+        # A file Dropbox lists as downloadable but without a content hash cannot be
+        # verified, so it cannot be mirrored; count it with the non-downloadable ones
+        # instead of letting it hold "percent mirrored" under 100 forever.
+        unhashed = ctx.state.connection.execute(
+            "UPDATE dropbox_objects SET is_downloadable=0 WHERE inventory_id=? AND tag='file' "
+            "AND is_downloadable=1 AND (content_hash IS NULL OR size IS NULL)",
+            (inventory_id,),
+        ).rowcount
     observed = bool(run["reconcile"])
     if observed:
         rclone = DropboxRcloneProvider(ctx.cfg, ctx.paths, ctx.state, ctx.logger)
@@ -3116,6 +3263,8 @@ def run(ctx: PhaseContext) -> PhaseResult:
         "bytes": int(summary["bytes"] or 0),
         "non_downloadable": int(summary["non_downloadable"] or 0),
         "observer": observed,
+        "unhashed": int(unhashed),
+        "pruned_inventories": prune_inventories(ctx.state.connection),
     }
     ctx.logger.info(PHASE, "gate", "Dropbox inventory complete", **outputs)
     return PhaseResult(outputs=outputs)
@@ -3439,6 +3588,11 @@ def test_pack_is_greedy_in_path_order_with_oversized_alone():
     assert [[r["path_lower"] for r in b] for b in batches] == [["/a"], ["/b"], ["/c"], ["/d"]]
 
 
+def test_pack_caps_files_per_batch():
+    rows = [{"path_lower": f"/{i}", "size": 1} for i in range(5)]
+    assert [len(b) for b in p30_plan.pack(rows, batch_bytes=100, batch_files=2)] == [2, 2, 1]
+
+
 def test_plan_writes_batches_and_items(state_context, monkeypatch):
     ctx = _ctx(state_context, Budget(batch_gb=10 / 1024**3, ceiling_gb=1, disk_headroom_gb=0))
     _changed(ctx, [("/A/one", 6), ("/A/two", 5), ("/big", 20)])
@@ -3494,9 +3648,15 @@ from typing import Any
 from .base import PhaseContext, PhaseError, PhaseResult
 
 PHASE = "30_plan"
+# ponytail: the round-trip downloads one file per CLI process, seconds each, so a batch
+# is bounded by its file count as much as by its bytes. 5,000 fits the budget only when
+# the measured cost is under about 1.8 s per file (see the README's first-run checks); a
+# batch that cannot finish never checkpoints and repeats every run. The upgrade path is a
+# recursive folder download when a batch covers a whole folder.
+BATCH_FILES = 5000
 
 
-def pack(rows: list[Any], batch_bytes: int) -> list[list[Any]]:
+def pack(rows: list[Any], batch_bytes: int, batch_files: int = BATCH_FILES) -> list[list[Any]]:
     """Greedy first-fit in path order; a file over batch_bytes is a batch by itself."""
     batches: list[list[Any]] = []
     current: list[Any] = []
@@ -3509,7 +3669,7 @@ def pack(rows: list[Any], batch_bytes: int) -> list[list[Any]]:
                 current, current_bytes = [], 0
             batches.append([row])
             continue
-        if current and current_bytes + size > batch_bytes:
+        if current and (current_bytes + size > batch_bytes or len(current) >= batch_files):
             batches.append(current)
             current, current_bytes = [], 0
         current.append(row)
@@ -3539,9 +3699,11 @@ def run(ctx: PhaseContext) -> PhaseResult:
         raise PhaseError(f"disk cannot hold a batch plus its round-trip copy: {free} free, {needed} needed")
     batches = pack(rows, budget.batch_bytes)
     with connection:
+        # A PLANNED batch from any run was never executed; each run re-plans from the
+        # state, so those rows are dead weight in every checkpoint that follows.
         connection.execute(
-            "DELETE FROM batch_items WHERE batch_id IN (SELECT id FROM batches WHERE run_id=?)", (ctx.run_id,))
-        connection.execute("DELETE FROM batches WHERE run_id=?", (ctx.run_id,))
+            "DELETE FROM batch_items WHERE batch_id IN (SELECT id FROM batches WHERE status='PLANNED')")
+        connection.execute("DELETE FROM batches WHERE status='PLANNED'")
         for number, batch in enumerate(batches, start=1):
             cursor = connection.execute(
                 "INSERT INTO batches(run_id, number, bytes, file_count, status) VALUES (?, ?, ?, ?, 'PLANNED')",
@@ -3569,7 +3731,7 @@ Add `"plan": PhaseDefinition(30, "plan", "30_plan", p30_plan.run),` with the imp
 - [ ] **Step 5: Run tests**
 
 Run: `task test -- tests/test_plan.py`
-Expected: PASS (5 tests).
+Expected: PASS (6 tests).
 
 - [ ] **Step 6: Commit**
 
@@ -3588,7 +3750,7 @@ git commit -m "feat(plan): ceiling and disk guards, greedy batch packing"
 **Interfaces:**
 - Consumes: `DropboxRcloneProvider.copy_files_from`, `ProtonCLIProvider.upload_tree/list_folder/download_file`, `child_cli_path`, `escape_component`, `unwrap`, `hash_file`, `walk_tree`, `statefile.push`, `Store`.
 - Produces (all take `ctx` and a `batch_id`):
-  `fetch(ctx, rclone, batch_id) -> dict`, `verify(ctx, batch_id) -> dict`, `upload(ctx, proton, batch_id) -> dict`, `confirm(ctx, proton, batch_id) -> dict`, `roundtrip(ctx, proton, batch_id) -> dict`, `checkpoint(ctx, store, batch_id) -> dict`; helpers `local_path(paths, path_display) -> Path`, `parent_cli_path(destination, path_display) -> str`, `items(ctx, batch_id, status=None) -> list[Row]`. Each returns counts that Task 14 stores in `batches.details_json`.
+  `fetch(ctx, rclone, batch_id) -> dict`, `verify(ctx, batch_id) -> dict`, `upload(ctx, proton, batch_id) -> dict`, `confirm(ctx, proton, batch_id) -> dict`, `roundtrip(ctx, proton, batch_id) -> dict`, `checkpoint(ctx, store, batch_id) -> dict`; helpers `local_path(paths, path_display) -> Path`, `parent_cli_path(destination, path_display) -> str`, `history_label(ctx) -> str` (the run's start epoch, the history key prefix every push uses), `items(ctx, batch_id, status=None) -> list[Row]`. Each returns counts that Task 14 stores in `batches.details_json`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -3877,6 +4039,12 @@ def _clear(directory: Path) -> None:
     directory.mkdir(parents=True, exist_ok=True)
 
 
+def history_label(ctx: PhaseContext) -> str:
+    """History objects are keyed by the run's start epoch: unique across runs even after
+    a rollback re-issues run ids, and what the spec's `.state/history/<epoch>-...` names."""
+    return str(int(ctx.state.current_run()["start_epoch"]))
+
+
 def _prune_empty_dirs(root: Path) -> None:
     for current, dirs, _files in os.walk(root, topdown=False):
         for name in dirs:
@@ -3894,20 +4062,28 @@ def fetch(ctx: PhaseContext, rclone: Any, batch_id: int) -> dict[str, int]:
     list_file = ctx.paths.root / "files-from.txt"
     list_file.write_text("".join(str(r["path_lower"]).lstrip("/") + "\n" for r in rows), encoding="utf-8")
     log_path = ctx.phase_dir(PHASE) / f"rclone-copy-{batch_id}.jsonl"
-    rclone.copy_files_from(list_file, ctx.paths.staging, log_path)
+    code = rclone.copy_files_from(list_file, ctx.paths.staging, log_path)
     counts: Counter[str] = Counter()
     for row in rows:
-        source = ctx.paths.staging / str(row["path_lower"]).lstrip("/")
-        if not source.is_file():
+        target = local_path(ctx.paths, str(row["path_display"]))
+        # rclone names the copy after the listed path, which is path_lower; a backend that
+        # answers with display casing is not ruled out, so either spelling is accepted.
+        source = next((p for p in (ctx.paths.staging / str(row["path_lower"]).lstrip("/"), target)
+                       if p.is_file()), None)
+        if source is None:
             _set_item(ctx, batch_id, row["path_lower"], "VANISHED", details_json=_details("vanished"))
             counts["vanished"] += 1
             continue
-        target = local_path(ctx.paths, str(row["path_display"]))
         target.parent.mkdir(parents=True, exist_ok=True)
         if source != target:
             os.replace(source, target)
         _set_item(ctx, batch_id, row["path_lower"], "FETCHED")
         counts["fetched"] += 1
+    if rows and counts["vanished"] == len(rows) and code == 0:
+        # rclone copied everything, yet nothing is where the listing said: the staging
+        # layout and path_lower disagree. Silent as VANISHED, this would checkpoint an
+        # empty batch as success and never mirror a byte.
+        raise PhaseError("rclone exited 0 but no listed file reached staging under its listed name")
     _prune_empty_dirs(ctx.paths.staging)
     list_file.unlink(missing_ok=True)
     ctx.logger.info(PHASE, "fetch", "batch fetched", batch=batch_id, **counts)
@@ -3978,7 +4154,8 @@ def _mismatch(node: dict[str, Any] | None, row: sqlite3.Row) -> str | None:
     if str(unwrap(node.get("type"))).casefold() != "file":
         return "type"
     active = unwrap(node.get("activeRevision")) or {}
-    if int(unwrap(active.get("claimedSize")) or -1) != int(row["size"]):
+    claimed = unwrap(active.get("claimedSize"))
+    if claimed is None or int(claimed) != int(row["size"]):  # an empty file claims 0, not "missing"
         return "size"
     digests = unwrap(active.get("claimedDigests")) or {}
     if str(unwrap(digests.get("sha1")) or "").casefold() != str(row["sha1"]).casefold():
@@ -4049,7 +4226,7 @@ def checkpoint(ctx: PhaseContext, store: Store, batch_id: int) -> dict[str, int]
         status = "FAILED" if failed else "CHECKPOINTED"
         connection.execute("UPDATE batches SET status=?, completed_at=? WHERE id=?", (status, now, batch_id))
     number = int(connection.execute("SELECT number FROM batches WHERE id=?", (batch_id,)).fetchone()[0])
-    statefile.push(ctx.state, ctx.runtime, ctx.paths, store, label=f"{ctx.run_id}-{number}")
+    statefile.push(ctx.state, ctx.runtime, ctx.paths, store, label=f"{history_label(ctx)}-{number}")
     _clear(ctx.paths.staging)
     ctx.logger.info(PHASE, "checkpoint", "batch checkpointed", batch=batch_id, checkpointed=len(good), failed=failed)
     return {"checkpointed": len(good), "failed": failed}
@@ -4239,8 +4416,10 @@ def run(ctx: PhaseContext) -> PhaseResult:
     proton = ProtonCLIProvider(ctx.cfg, ctx.state, ctx.logger,
                                after_call=lambda: session.writeback(ctx.runtime, ctx.paths, store))
     rclone = DropboxRcloneProvider(ctx.cfg, ctx.paths, ctx.state, ctx.logger)
-    if planned:
-        proton.root_uid(PHASE)
+    # Unconditional: the one Proton call a quiet night is guaranteed to make. It forces any
+    # pending token rotation (after_call writes the session back) and keeps the 60-day
+    # idle expiry away, besides gating on the destination UID.
+    proton.root_uid(PHASE)
     budget = int(run["budget_minutes"]) * 60
     start_epoch = int(run["start_epoch"])
     durations: list[float] = []
@@ -4270,7 +4449,7 @@ def run(ctx: PhaseContext) -> PhaseResult:
                 step_began = now()
                 details.update(step())
                 details[f"{name}_seconds"] = round(now() - step_began, 1)
-        except PhaseError:
+        except Exception:  # provider errors included: the batch row must say FAILED
             with ctx.state.connection:
                 ctx.state.connection.execute(
                     "UPDATE batches SET status='FAILED', completed_at=?, details_json=? WHERE id=?",
@@ -4332,7 +4511,7 @@ git commit -m "feat(batches): budgeted batch loop with chain decision"
 
 **Interfaces:**
 - Consumes: `delta_deleted`, `runs.remaining_batches`, `ProtonCLIProvider.list_folder/trash`, `batch.parent_cli_path`, `child_cli_path`, `unwrap`, `session.writeback`, `Store`, `statefile.push`.
-- Produces: `p50_trash.run(ctx)`; records `deletions` rows (TRASHED or NOT_FOUND), removes the rows from `mirror_objects`, pushes the state with label `<run>-trash`; outputs `{planned, trashed, not_found, folders}`. Runs only when `remaining_batches == 0`; otherwise returns PASS with `{"skipped": "batches remain"}`.
+- Produces: `p50_trash.run(ctx)`; records `deletions` rows (TRASHED, NOT_FOUND, or LISTING_FAILED when the parent folder could not be listed), removes the TRASHED and NOT_FOUND rows from `mirror_objects` so a LISTING_FAILED file is retried the next night, pushes the state with label `<epoch>-trash`; outputs `{planned, trashed, not_found, listing_failed, folders}`. Runs only when `remaining_batches == 0`; otherwise returns PASS with `{"skipped": "batches remain"}`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -4385,12 +4564,24 @@ def test_trash_groups_by_parent_and_drops_state_rows(state_context, monkeypatch,
     proton.trash = lambda paths, phase: proton.trashed.append(sorted(paths))
     _wire(monkeypatch, proton)
     result = p50_trash.run(ctx)
-    assert result.outputs == {"planned": 4, "trashed": 3, "not_found": 1, "folders": 2}
+    assert result.outputs == {"planned": 4, "trashed": 3, "not_found": 1, "listing_failed": 0, "folders": 2}
     assert proton.trashed == [["/my-files/Dropbox/Docs/a.txt", "/my-files/Dropbox/Docs/b.txt"],
                               ["/my-files/Dropbox/Other/c.txt"]]
     assert ctx.state.connection.execute("SELECT COUNT(*) FROM mirror_objects").fetchone()[0] == 0
     statuses = {r["path_lower"]: r["status"] for r in ctx.state.connection.execute("SELECT * FROM deletions")}
     assert statuses["/docs/never-there.txt"] == "NOT_FOUND" and statuses["/docs/a.txt"] == "TRASHED"
+
+
+def test_trash_keeps_state_rows_when_a_parent_listing_fails(state_context, monkeypatch, plain_crypt):
+    ctx = _ctx(state_context)
+    _deleted(ctx, ["/Docs/a.txt"])
+    proton = FakeProton({}, {}, fail_list=["/my-files/Dropbox/Docs"])
+    proton.trash = lambda paths, phase: (_ for _ in ()).throw(AssertionError("nothing to trash"))
+    _wire(monkeypatch, proton)
+    result = p50_trash.run(ctx)
+    assert result.outputs == {"planned": 1, "trashed": 0, "not_found": 0, "listing_failed": 1, "folders": 0}
+    assert ctx.state.connection.execute("SELECT COUNT(*) FROM mirror_objects").fetchone()[0] == 1
+    assert ctx.state.connection.execute("SELECT status FROM deletions").fetchone()[0] == "LISTING_FAILED"
 
 
 def test_trash_skips_while_batches_remain(state_context, monkeypatch, plain_crypt):
@@ -4427,7 +4618,7 @@ from ..logging import utc_now
 from ..providers.proton_cli import ProtonCLIError, ProtonCLIProvider, child_cli_path, unwrap
 from ..store import Store
 from .base import PhaseContext, PhaseResult
-from .batch import parent_cli_path
+from .batch import history_label, parent_cli_path
 
 PHASE = "50_trash"
 
@@ -4443,7 +4634,7 @@ def run(ctx: PhaseContext) -> PhaseResult:
         ctx.logger.info(PHASE, "gate", "trash deferred until every batch has landed", planned=len(rows))
         return PhaseResult(outputs={"skipped": "batches remain", "planned": len(rows)})
     if not rows:
-        return PhaseResult(outputs={"planned": 0, "trashed": 0, "not_found": 0, "folders": 0})
+        return PhaseResult(outputs={"planned": 0, "trashed": 0, "not_found": 0, "listing_failed": 0, "folders": 0})
     store = Store(ctx.runtime, ctx.paths)
     proton = ProtonCLIProvider(ctx.cfg, ctx.state, ctx.logger,
                                after_call=lambda: session.writeback(ctx.runtime, ctx.paths, store))
@@ -4456,7 +4647,11 @@ def run(ctx: PhaseContext) -> PhaseResult:
         try:
             children = proton.list_folder(parent, PHASE)
         except ProtonCLIError:
-            children = []
+            # The files may well still be there: keep their state rows so tomorrow retries.
+            for row in group:
+                _record(ctx, row, "LISTING_FAILED", None)
+            counts["listing_failed"] += len(group)
+            continue
         names: Counter[str] = Counter(str(unwrap(node.get("name"))) for node in children)
         by_name = {str(unwrap(node.get("name"))): node for node in children}
         targets = []
@@ -4479,11 +4674,12 @@ def run(ctx: PhaseContext) -> PhaseResult:
         counts["folders"] += 1
     with connection:
         connection.execute(
-            "DELETE FROM mirror_objects WHERE path_lower IN (SELECT path_lower FROM delta_deleted WHERE run_id=?)",
+            """DELETE FROM mirror_objects WHERE path_lower IN
+               (SELECT path_lower FROM deletions WHERE run_id=? AND status IN ('TRASHED', 'NOT_FOUND'))""",
             (ctx.run_id,))
-    statefile.push(ctx.state, ctx.runtime, ctx.paths, store, label=f"{ctx.run_id}-trash")
+    statefile.push(ctx.state, ctx.runtime, ctx.paths, store, label=f"{history_label(ctx)}-trash")
     outputs = {"planned": len(rows), "trashed": counts["trashed"], "not_found": counts["not_found"],
-               "folders": counts["folders"]}
+               "listing_failed": counts["listing_failed"], "folders": counts["folders"]}
     ctx.logger.info(PHASE, "gate", "deleted files trashed", **outputs)
     return PhaseResult(outputs=outputs)
 
@@ -4506,7 +4702,7 @@ Add `"trash": PhaseDefinition(50, "trash", "50_trash", p50_trash.run),` with the
 - [ ] **Step 5: Run tests**
 
 Run: `task test -- tests/test_trash.py`
-Expected: PASS (3 tests).
+Expected: PASS (4 tests).
 
 - [ ] **Step 6: Commit**
 
@@ -4580,6 +4776,7 @@ def test_reconcile_drops_missing_or_missized_and_trashes_strays(state_context, m
                                                             ("/Keep/pending.txt", 7, "h", 1, "file")])
     ctx.state.update_run(ctx.run_id, inventory_id=inventory_id)
     _mirror(ctx.state, [("/Keep/ok.txt", 3, None), ("/Keep/lost.txt", 2, "u-lost"), ("/Keep/bad.txt", 5, "u-bad")])
+    _snapshot(ctx.state, [("Old/x", "u-old", 1)])  # last week's walk; pruned by this run
     snapshot_id = _snapshot(ctx.state, [("Keep/ok.txt", "u-ok", 3), ("Keep/bad.txt", "u-bad", 99),
                                         ("Keep/pending.txt", "u-p", 7), ("Stray/x.bin", "u-stray", 1)])
     trashed = []
@@ -4597,6 +4794,7 @@ def test_reconcile_drops_missing_or_missized_and_trashes_strays(state_context, m
     assert trashed == ["/my-files/Dropbox/Stray/x.bin"]
     left = {r["path_lower"]: r["proton_uid"] for r in ctx.state.connection.execute("SELECT * FROM mirror_objects")}
     assert left == {"/keep/ok.txt": "u-ok"}
+    assert ctx.state.connection.execute("SELECT COUNT(*) FROM proton_snapshots").fetchone()[0] == 1
 
 
 def test_reconcile_skips_when_not_scheduled(state_context, monkeypatch, plain_crypt):
@@ -4624,6 +4822,7 @@ from ..filesystem import comparison_key
 from ..providers.proton_cli import ProtonCLIProvider
 from ..store import Store
 from .base import PhaseContext, PhaseResult
+from .batch import history_label
 
 PHASE = "60_reconcile"
 
@@ -4642,6 +4841,14 @@ def run(ctx: PhaseContext) -> PhaseResult:
     proton.root_uid(PHASE)
     snapshot_id = proton.inventory(f"reconcile:{ctx.run_id}", PHASE, reuse_complete=True)
     connection = ctx.state.connection
+    with connection:
+        # One walk is enough evidence; the previous one is dead weight in every checkpoint.
+        stale = [(int(r["id"]),) for r in connection.execute(
+            "SELECT id FROM proton_snapshots WHERE id != ?", (snapshot_id,))]
+        for table in ("proton_nodes", "proton_folders"):
+            connection.executemany(f"DELETE FROM {table} WHERE snapshot_id=?", stale)
+        connection.executemany("DELETE FROM proton_snapshots WHERE id=?", stale)
+    # proton_nodes.relative_path has no leading slash; Dropbox display paths do.
     nodes = {
         str(row["comparison_key"]): row
         for row in connection.execute(
@@ -4650,7 +4857,7 @@ def run(ctx: PhaseContext) -> PhaseResult:
     dropped = refreshed = 0
     with connection:
         for row in connection.execute("SELECT * FROM mirror_objects").fetchall():
-            node = nodes.get(comparison_key(str(row["path_display"])))
+            node = nodes.get(comparison_key(str(row["path_display"]).lstrip("/")))
             if node is None or node["claimed_size"] is None or int(node["claimed_size"]) != int(row["size"]):
                 connection.execute("DELETE FROM mirror_objects WHERE path_lower=?", (row["path_lower"],))
                 dropped += 1
@@ -4659,11 +4866,11 @@ def run(ctx: PhaseContext) -> PhaseResult:
                                    (node["uid"], row["path_lower"]))
                 refreshed += 1
     known = {
-        comparison_key(str(row["path_display"]))
+        comparison_key(str(row["path_display"]).lstrip("/"))
         for row in connection.execute("SELECT path_display FROM mirror_objects")
     }
     known |= {
-        comparison_key(str(row["path_display"]))
+        comparison_key(str(row["path_display"]).lstrip("/"))
         for row in connection.execute(
             "SELECT path_display FROM dropbox_objects WHERE inventory_id=? AND tag='file' AND is_downloadable=1",
             (run["inventory_id"],))
@@ -4671,7 +4878,7 @@ def run(ctx: PhaseContext) -> PhaseResult:
     strays = sorted(str(node["cli_path"]) for key, node in nodes.items() if key not in known)
     if strays:
         proton.trash(strays, PHASE)
-    statefile.push(ctx.state, ctx.runtime, ctx.paths, store, label=f"{ctx.run_id}-reconcile")
+    statefile.push(ctx.state, ctx.runtime, ctx.paths, store, label=f"{history_label(ctx)}-reconcile")
     outputs = {"snapshot_id": snapshot_id, "proton_files": len(nodes), "dropped": dropped,
                "uid_refreshed": refreshed, "strays_trashed": len(strays)}
     ctx.logger.info(PHASE, "gate", "weekly reconcile complete", **outputs)
@@ -4706,7 +4913,7 @@ git commit -m "feat(reconcile): weekly Proton walk corrects state and trashes st
 
 **Interfaces:**
 - Consumes: `runs`, `batches`, `batch_items`, `deletions`, `events`, `commands`, `phase_runs`, `dropbox_objects`, `mirror_objects`, `WorkPaths.report`, `WorkPaths.chain`.
-- Produces: `p70_report.run(ctx)` writing `paths.report` (Markdown), writing `paths.chain` when `runs.chain == 1`, finishing the run row (`SUCCESS` when every phase of this run passed, else `FAIL`), and logging one event whose fields are the full figures dict; `figures(ctx) -> dict` is the pure aggregation. `p80_empty_trash.run(ctx)` calls `ProtonCLIProvider.empty_trash` under `--apply`.
+- Produces: `p70_report.run(ctx)` writing `paths.report` (Markdown), writing `paths.chain` when `runs.chain == 1`, finishing the run row (`SUCCESS` when every phase of this run passed, else `FAIL`), logging one event whose fields are the full figures dict, pushing the state under `--apply` with label `<epoch>-report`, and returning the run status as the phase status so a FAIL run stops the pipeline before the success ping; `figures(ctx) -> dict` is the pure aggregation. The workflow re-runs `report` only when `report.md` is absent, because `finish_run` leaves no RUNNING row for a second pass. `p80_empty_trash.run(ctx)` calls `ProtonCLIProvider.empty_trash` under `--apply`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -4719,6 +4926,7 @@ import json
 
 from migrator.phases import p70_report
 from migrator.phases.base import PhaseContext
+from tests.test_session import FakeStore, plain_crypt  # noqa: F401
 
 
 def _ctx(state_context):
@@ -4765,9 +4973,11 @@ def _populate(ctx, chain=True):
         state.complete_phase(pid, "PASS")
 
 
-def test_figures_and_markdown_carry_counts_never_names(state_context):
+def test_figures_and_markdown_carry_counts_never_names(state_context, monkeypatch, plain_crypt):
     ctx = _ctx(state_context)
     _populate(ctx)
+    store = FakeStore()
+    monkeypatch.setattr(p70_report, "Store", lambda runtime, paths: store)
     figures = p70_report.figures(ctx)
     assert figures["mirror"] == {"inventory_files": 2, "inventory_bytes": 150, "mirrored_files": 1,
                                  "mirrored_bytes": 100, "percent_mirrored": 66.7, "non_downloadable": 1,
@@ -4785,18 +4995,20 @@ def test_figures_and_markdown_carry_counts_never_names(state_context):
     assert result.outputs["status"] == "SUCCESS"
     row = ctx.state.connection.execute("SELECT status FROM runs WHERE id=?", (ctx.run_id,)).fetchone()
     assert row["status"] == "SUCCESS"
+    assert sorted(store.objects) == [".state/history/1000-report.sqlite.xz.age", ".state/state.sqlite.xz.age"]
     event = ctx.state.connection.execute(
         "SELECT fields_json FROM events WHERE operation='figures' ORDER BY id DESC LIMIT 1").fetchone()
     assert json.loads(event["fields_json"])["mirror"]["mirrored_files"] == 1
 
 
-def test_report_marks_failed_run_and_writes_no_chain(state_context):
+def test_report_marks_failed_run_and_writes_no_chain(state_context, monkeypatch, plain_crypt):
     ctx = _ctx(state_context)
     _populate(ctx, chain=False)
+    monkeypatch.setattr(p70_report, "Store", lambda runtime, paths: FakeStore())
     pid = ctx.state.start_phase(40, "40_batches", apply=True, inputs={"run_id": ctx.run_id})
     ctx.state.complete_phase(pid, "FAIL", error_summary="batch 1 failed")
     result = p70_report.run(ctx)
-    assert result.outputs["status"] == "FAIL"
+    assert result.status == "FAIL" and result.outputs["status"] == "FAIL"
     assert not ctx.paths.chain.exists()
     assert "FAIL" in ctx.paths.report.read_text(encoding="utf-8")
 ```
@@ -4815,7 +5027,10 @@ import json
 import math
 from typing import Any
 
+from .. import statefile
+from ..store import Store
 from .base import PhaseContext, PhaseResult
+from .batch import history_label
 
 PHASE = "70_report"
 ERROR_CLASSES = {
@@ -4841,17 +5056,21 @@ def _batch_details(ctx: PhaseContext) -> list[dict[str, Any]]:
     ]
 
 
-def _throttling(ctx: PhaseContext, provider_phase_like: str, command_provider: str) -> dict[str, float]:
+def _throttling(ctx: PhaseContext, provider_phase_like: str, command_provider: str,
+                since: str) -> dict[str, float]:
+    """This run only: `since` is runs.started_at, and the evidence tables carry no run id.
+    (`commands.started_at` per the donor DDL, Task 4 step 5.)"""
     connection = ctx.state.connection
     waits = [
         float(json.loads(row["fields_json"] or "{}").get("wait_seconds") or 0)
         for row in connection.execute(
-            "SELECT fields_json FROM events WHERE provider_category='RATE_LIMIT' AND operation LIKE ?",
-            (provider_phase_like,))
+            "SELECT fields_json FROM events WHERE provider_category='RATE_LIMIT' AND operation LIKE ? "
+            "AND timestamp >= ?",
+            (provider_phase_like, since))
     ]
     commands = int(connection.execute(
-        "SELECT COUNT(*) FROM commands WHERE provider=? AND response_category='RATE_LIMIT'",
-        (command_provider,)).fetchone()[0])
+        "SELECT COUNT(*) FROM commands WHERE provider=? AND response_category='RATE_LIMIT' AND started_at >= ?",
+        (command_provider, since)).fetchone()[0])
     return {
         "rate_limited": len(waits) + commands,
         "wait_seconds": round(sum(waits), 1),
@@ -4862,6 +5081,7 @@ def _throttling(ctx: PhaseContext, provider_phase_like: str, command_provider: s
 def figures(ctx: PhaseContext) -> dict[str, Any]:
     connection = ctx.state.connection
     run = ctx.state.current_run()
+    since = str(run["started_at"])
     inventory = connection.execute(
         """SELECT SUM(CASE WHEN is_downloadable=1 THEN 1 ELSE 0 END) AS files,
                   COALESCE(SUM(CASE WHEN is_downloadable=1 THEN size ELSE 0 END), 0) AS bytes,
@@ -4901,12 +5121,14 @@ def figures(ctx: PhaseContext) -> dict[str, Any]:
     failed_phases = [row["phase_name"] for row in phases if row["status"] == "FAIL"]
     errors = {
         label: int(connection.execute(
-            "SELECT COUNT(*) FROM events WHERE level='ERROR' AND (message LIKE ? OR safe_raw_error LIKE ?)",
-            (f"%{needle}%", f"%{needle}%")).fetchone()[0])
+            "SELECT COUNT(*) FROM events WHERE level='ERROR' AND timestamp >= ? "
+            "AND (message LIKE ? OR safe_raw_error LIKE ?)",
+            (since, f"%{needle}%", f"%{needle}%")).fetchone()[0])
         for label, needle in ERROR_CLASSES.items()
     }
     errors["command non-zero exit"] = int(connection.execute(
-        "SELECT COUNT(*) FROM commands WHERE exit_code IS NOT NULL AND exit_code != 0").fetchone()[0])
+        "SELECT COUNT(*) FROM commands WHERE exit_code IS NOT NULL AND exit_code != 0 AND started_at >= ?",
+        (since,)).fetchone()[0])
     deletions = connection.execute(
         "SELECT status, COUNT(*) AS n FROM deletions WHERE run_id=? GROUP BY status", (ctx.run_id,)).fetchall()
     cumulative_verified = int(connection.execute("SELECT COUNT(*) FROM mirror_objects").fetchone()[0])
@@ -4949,8 +5171,8 @@ def figures(ctx: PhaseContext) -> dict[str, Any]:
             "batch_seconds_max": durations[-1] if durations else 0,
         },
         "throttling": {
-            "dropbox": _throttling(ctx, "files/%", "rclone"),
-            "proton": _throttling(ctx, "proton%", "proton"),
+            "dropbox": _throttling(ctx, "files/%", "rclone", since),
+            "proton": _throttling(ctx, "proton%", "proton", since),
         },
         "errors": errors,
         "verification": {
@@ -4988,6 +5210,7 @@ def render(fig: dict[str, Any], status: str) -> str:
 
 
 def run(ctx: PhaseContext) -> PhaseResult:
+    label = f"{history_label(ctx)}-report"  # before finish_run: current_run() needs the RUNNING row
     fig = figures(ctx)
     status = "FAIL" if fig["failed_phases"] else "SUCCESS"
     ctx.paths.report.write_text(render(fig, status), encoding="utf-8")
@@ -4996,7 +5219,12 @@ def run(ctx: PhaseContext) -> PhaseResult:
         ctx.paths.chain.write_text("chain\n", encoding="utf-8")
     ctx.state.finish_run(ctx.run_id, status)
     ctx.logger.info(PHASE, "figures", "run figures", **fig)
-    return PhaseResult(outputs={"status": status, "chain": fig["mirror"]["chain"], "report": str(ctx.paths.report)})
+    if ctx.apply:
+        # The run row, its figures event and the final status exist only here until pushed.
+        statefile.push(ctx.state, ctx.runtime, ctx.paths, Store(ctx.runtime, ctx.paths), label=label)
+    # The phase status is the run status: a FAIL run stops `task pipeline` before `ping`.
+    return PhaseResult(status=status,
+                       outputs={"status": status, "chain": fig["mirror"]["chain"], "report": str(ctx.paths.report)})
 ```
 
 Proton's CLI backs off internally, so `throttling.proton.rate_limited` counts only commands whose stderr mentioned a rate limit; the sustained upload rate beside it is the second gauge (spec section 5.5).
@@ -5052,7 +5280,7 @@ git commit -m "feat(report): counts-only step summary, chain marker, empty-trash
 
 **Interfaces:**
 - Consumes: every `python -m migrator` command from Tasks 9 through 17.
-- Produces: `task pipeline` (inside the toolbox), `task sync` (host wrapper with secrets), `task plan`, `task status`, `task render`, `task empty-trash`, `task state-rollback -- <key>`, `task session-seal -- <dir>`, and the internal step tasks `clock session state inventory delta plan-phase batches trash reconcile report-phase ping`. The banner lists every operator-facing task.
+- Produces: `task pipeline` (inside the toolbox), `task sync` (host wrapper with secrets), `task plan`, `task status`, `task render`, `task empty-trash`, `task state-rollback -- <key>`, `task session-seal -- <dir>`, and the internal step tasks `clock session state inventory delta plan-phase batches trash reconcile report-phase ping ping-fail empty-trash-pipeline`. The banner lists every operator-facing task.
 
 - [ ] **Step 1: Write op.env**
 
@@ -5081,18 +5309,13 @@ Insert after `vars:` (before `tasks:`):
   RUN_EPOCH:
     sh: date +%s
 
-# Non-secret runtime environment. Applies inside the toolbox where `task pipeline`
-# runs; harmless on the host. Literals here are never secrets, so `op run` masking
-# cannot corrupt output by masking a common word such as "auto".
+# Run-scoped environment for the step tasks below. The rclone remote literals are ENV
+# lines in the Dockerfile so that every in-toolbox command sees them, wrapped by an
+# inner `task` or not.
 env:
   MIRROR_RUN_EPOCH: '{{.RUN_EPOCH}}'
   MIRROR_WORK_DIR: .run
   MIRROR_CONFIG: config/mirror.toml
-  RCLONE_CONFIG_DROPBOX_TYPE: dropbox
-  RCLONE_CONFIG_R2_TYPE: s3
-  RCLONE_CONFIG_R2_PROVIDER: Cloudflare
-  RCLONE_CONFIG_R2_REGION: auto
-  RCLONE_CONFIG_R2_NO_CHECK_BUCKET: "true"
 ```
 
 Replace the `default` banner body with:
@@ -5157,7 +5380,7 @@ Append these tasks:
       - task: inventory
       - task: delta
       - task: plan-phase
-      - task: report-phase
+      - python -m migrator report   # no --apply: a read-only plan pushes nothing to R2
 
   clock:        { internal: true, cmds: ['python -m migrator clock'] }
   session:      { internal: true, cmds: ['python -m migrator session'] }
@@ -5168,8 +5391,16 @@ Append these tasks:
   batches:      { internal: true, cmds: ['python -m migrator --apply batches'] }
   trash:        { internal: true, cmds: ['python -m migrator --apply trash'] }
   reconcile:    { internal: true, cmds: ['python -m migrator --apply reconcile'] }
-  report-phase: { internal: true, cmds: ['python -m migrator report'] }
+  report-phase: { internal: true, cmds: ['python -m migrator --apply report'] }
   ping:         { internal: true, cmds: ['python -m migrator ping'] }
+  ping-fail:    { internal: true, cmds: ['python -m migrator ping fail'] }
+  empty-trash-pipeline:
+    internal: true
+    cmds:
+      - task: clock
+      - task: session
+      - task: state
+      - python -m migrator --apply empty-trash
 
   # ---- read ----
   plan:
@@ -5183,7 +5414,7 @@ Append these tasks:
     desc: Counts from the state in R2
     cmds:
       - task: op
-        vars: { CLI_ARGS: 'sh -c "python -m migrator clock && python -m migrator state && python -m migrator status"' }
+        vars: { CLI_ARGS: python -m migrator status }
 
   render:
     desc: Dry-run the whole pipeline inside the toolbox with no network
@@ -5203,7 +5434,7 @@ Append these tasks:
     prompt: This permanently deletes everything in Proton Drive trash. Continue?
     cmds:
       - task: op
-        vars: { CLI_ARGS: 'sh -c "python -m migrator clock && python -m migrator session && python -m migrator state && python -m migrator --apply empty-trash"' }
+        vars: { CLI_ARGS: task empty-trash-pipeline }
 
   state-rollback:
     desc: 'Copy a history object over the canonical state: task state-rollback -- <key>'
@@ -5218,7 +5449,7 @@ Append these tasks:
         vars: { CLI_ARGS: 'python -m migrator session-seal {{.CLI_ARGS}}' }
 ```
 
-`task status` runs clock and state first because the state lives in R2; the run row that creates is marked INTERRUPTED by the next real run, which is harmless evidence.
+`task status` fetches the state itself and starts no run row, so it leaves nothing behind in R2 and cannot mask the reconcile day. Every operator task that needs the run-scoped environment (`MIRROR_RUN_EPOCH`) goes through an inner task; `state-rollback` and `session-seal` need none.
 
 - [ ] **Step 3: Write the banner drift check**
 
@@ -5273,7 +5504,7 @@ git commit -m "feat(taskfile): pipeline steps, operator menu, op.env references"
 - Create: `.github/workflows/sync.yml`, `.github/workflows/check.yml`
 
 **Interfaces:**
-- Consumes: `task run -- task pipeline`, `.run/report.md`, `.run/chain`, `python -m migrator ping --fail`, `config/toolchain.lock.toml` (go-task version and checksum for the runner).
+- Consumes: `task run -- task pipeline`, `.run/report.md`, `.run/chain`, `task run -- task report-phase`, `task run -- task ping-fail`, `config/toolchain.lock.toml` (go-task version and checksum for the runner).
 - Produces: a dispatch-only sync workflow that chains itself, and a pull-request check workflow.
 
 - [ ] **Step 1: Write sync.yml**
@@ -5344,17 +5575,14 @@ jobs:
       - name: Run the pipeline in the toolbox
         run: task run -- task pipeline
 
-      - name: Publish the report
+      - name: Publish the report; ping /fail unless the job succeeded
         if: always()
         run: |
+          # report.md exists whenever the report phase ran (it also finished the run row, so
+          # a second pass has no RUNNING run). A run that died earlier gets its report now.
+          if [ ! -f .run/report.md ]; then task run -- task report-phase || true; fi
           if [ -f .run/report.md ]; then cat .run/report.md >> "$GITHUB_STEP_SUMMARY"; fi
-
-      - name: Report and ping on failure
-        if: failure()
-        run: |
-          task run -- python -m migrator report || true
-          if [ -f .run/report.md ]; then cat .run/report.md >> "$GITHUB_STEP_SUMMARY"; fi
-          task run -- python -m migrator ping --fail
+          if [ "${{ job.status }}" != "success" ]; then task run -- task ping-fail; fi
 
       - name: Chain the next run
         if: success()
@@ -5473,7 +5701,7 @@ byte-compared before the state records it. R2 holds the only record of progress.
 - **A run fails with `PhaseError` and `login first` in the state events.** The Proton
   session is gone. Repeat bootstrap step 3's login and `task session-seal -- ./pd`.
 - **The state looks wrong after a run.** `task state-rollback` lists
-  `.state/history/<run>-<batch>` objects; `task state-rollback -- <key>` copies one over the
+  `.state/history/<epoch>-<batch>` objects; `task state-rollback -- <key>` copies one over the
   canonical state. The next run repeats from there; re-uploads skip SHA-1-identical files.
 - **`state object is missing but history exists`.** Roll back as above. Never delete
   history to make a run start fresh; that would treat a lost state as an empty mirror.
@@ -5485,6 +5713,10 @@ byte-compared before the state records it. R2 holds the only record of progress.
 - **Throttling.** The summary's throttling table is the gauge. If Proton 429s appear or the
   upload rate collapses, lower `batch_gb` in `config/mirror.toml`; Dropbox stays at 10 rps.
 - **Empty the trash.** `task empty-trash` asks for confirmation and is never scheduled.
+- **Never run `task sync` or `task empty-trash` from the laptop while a CI run may be in
+  progress.** Two processes holding the Proton session race the refresh token; the loser
+  wipes its copy and the next run needs a login. `task plan` and `task status` make no
+  Proton call and are safe at any time.
 - **Move the runner.** The same image and Taskfile run on atium under cron with the same
   `op.env`: `task sync` there is the whole job, and the next cron tick is the chain.
 ```
@@ -5511,3 +5743,4 @@ The first dispatched run answers the spec's open unknowns; record each answer in
 2. Whether Proton challenges the refresh call from Azure egress (spec risk 4).
 3. The real per-batch duration, which sets whether `batch_gb=4` and `run_budget_minutes=165` stay.
 4. That `.run/chain` triggers the next run and the concurrency group queues it.
+5. Seconds per file in `roundtrip_seconds` against the batch's file count: the CLI is spawned once per round-tripped file. `BATCH_FILES` in `p30_plan.py` is 5,000, which needs under about 1.8 s per file to finish inside `RUN_BUDGET_MIN`; if the first batch is killed by the job timeout before it checkpoints, lower the cap before the next dispatch (the run would otherwise repeat that batch every night), and if the cost is seconds per file build the recursive folder download from the review notes.
