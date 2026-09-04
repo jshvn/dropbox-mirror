@@ -26,8 +26,8 @@ byte-compared before the state records it. R2 holds the only record of progress.
    `proton-drive filesystem list -j /my-files` and copy the folder's `uid` into
    `config/mirror.toml`. Check `proton-drive filesystem upload --help` and confirm the flags
    in `src/migrator/providers/proton_cli.py` `upload_tree` match; record any change here.
-   The argv carries no `-t`: the design lists it, the upload does not need it, and this
-   `--help` diff is what settles whether the installed CLI wants it back.
+   Checked against 0.8.0: `-t` is the short form of `--skip-thumbnails`, which the argv
+   carries, and `--json` is a general option every command accepts.
 4. **age.** `age-keygen` once; store the `AGE-SECRET-KEY-...` line as vault item `age`, field
    `identity`.
 5. **R2.** Create a bucket, an API token scoped to it, and a lifecycle rule that expires
