@@ -16,8 +16,9 @@ byte-compared before the state records it. R2 holds the only record of progress.
 2. **Dropbox.** Create a private "Full Dropbox" app with `files.metadata.read` and
    `files.content.read`. Run the OAuth code flow with `token_access_type=offline` on the
    laptop and store `app_key`, `app_secret`, `refresh_token` in the vault item `dropbox`.
-   Run `rclone authorize dropbox --client-id <key> --client-secret <secret>` and store the
-   printed token JSON as field `rclone_token`. Put your account id in
+   Add `http://localhost:53682/` to the app's redirect URIs, run
+   `rclone authorize dropbox <key> <secret>`, and store the printed token JSON as field
+   `rclone_token`. Put your account id in
    `config/mirror.toml` (`dbid:...`, from `users/get_current_account`).
 3. **Proton.** Turn telemetry off in account settings. On the laptop:
    `PROTON_DRIVE_CACHE_DIR=./pd PROTON_DRIVE_CREDENTIALS_STORE=unsafe_file proton-drive auth login`,
