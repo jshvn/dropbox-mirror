@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from conftest import FakeStore, seed_api_inventory
 
 from migrator.filesystem import comparison_key
@@ -7,13 +9,13 @@ from migrator.phases import p60_reconcile
 from migrator.phases.base import PhaseContext
 
 
-def _ctx(state_context, reconcile=True, remaining=0):
+def _ctx(state_context, reconcile=True, remaining=0, start_epoch=1, budget_minutes=1):
     cfg, paths, state, logger, runtime = state_context
     run_id = state.start_run(
-        start_epoch=1,
+        start_epoch=start_epoch,
         hour_utc=0,
         weekday=0,
-        budget_minutes=1,
+        budget_minutes=budget_minutes,
         host="t",
         reconcile=reconcile,
     )
@@ -22,18 +24,22 @@ def _ctx(state_context, reconcile=True, remaining=0):
     return PhaseContext(cfg, paths, state, logger, True, phase_run_id, run_id, runtime)
 
 
-def _snapshot(state, nodes):
+def _snapshot(state, nodes, status="COMPLETE"):
+    """nodes: (relative, uid, size) or (relative, uid, size, sha1)."""
     with state.connection:
         cursor = state.connection.execute(
             """INSERT INTO proton_snapshots(purpose, started_at, completed_at, status, destination_root, cli_version)
-               VALUES ('reconcile', 'now', 'now', 'COMPLETE', '/my-files/Dropbox', '0.8.0')"""
+               VALUES ('reconcile', 'now', 'now', ?, '/my-files/Dropbox', '0.8.0')""",
+            (status,),
         )
         snapshot_id = int(cursor.lastrowid)
-        for relative, uid, size in nodes:
+        for entry in nodes:
+            relative, uid, size, *rest = entry
+            sha1 = rest[0] if rest else None
             state.connection.execute(
                 """INSERT INTO proton_nodes(snapshot_id, uid, parent_uid, visible_segments_json, relative_path, cli_path,
-                   comparison_key, name, node_type, claimed_size, raw_json)
-                   VALUES (?, ?, '__ROOT__', '[]', ?, ?, ?, ?, 'file', ?, '{}')""",
+                   comparison_key, name, node_type, claimed_size, sha1, raw_json)
+                   VALUES (?, ?, '__ROOT__', '[]', ?, ?, ?, ?, 'file', ?, ?, '{}')""",
                 (
                     snapshot_id,
                     uid,
@@ -42,22 +48,33 @@ def _snapshot(state, nodes):
                     comparison_key(relative),
                     relative.rsplit("/", 1)[-1],
                     size,
+                    sha1,
                 ),
             )
     return snapshot_id
 
 
 def _mirror(state, rows):
+    """rows: (display, size, uid) or (display, size, uid, sha1)."""
     with state.connection:
-        for display, size, uid in rows:
+        for entry in rows:
+            display, size, uid, *rest = entry
+            sha1 = rest[0] if rest else "s"
             state.connection.execute(
                 """INSERT INTO mirror_objects(path_lower, path_display, size, content_hash, sha1, sha256, proton_uid,
-                   run_id, mirrored_at) VALUES (?, ?, ?, 'h', 's', 's', ?, 0, 'now')""",
-                (display.lower(), display, size, uid),
+                   run_id, mirrored_at) VALUES (?, ?, ?, 'h', ?, 's', ?, 0, 'now')""",
+                (display.lower(), display, size, sha1, uid),
             )
 
 
-def test_reconcile_drops_missing_or_missized_and_trashes_strays(
+def _figures_event(state):
+    row = state.connection.execute(
+        "SELECT fields_json FROM events WHERE phase='60_reconcile' AND operation='figures'"
+    ).fetchone()
+    return json.loads(row["fields_json"])
+
+
+def test_reconcile_drops_missing_missized_and_sha1_mismatched(
     state_context, monkeypatch, plain_crypt
 ):
     ctx = _ctx(state_context)
@@ -70,9 +87,10 @@ def test_reconcile_drops_missing_or_missized_and_trashes_strays(
     _mirror(
         ctx.state,
         [
-            ("/Keep/ok.txt", 3, None),
-            ("/Keep/lost.txt", 2, "u-lost"),
-            ("/Keep/bad.txt", 5, "u-bad"),
+            ("/Keep/ok.txt", 3, None, "sha-ok"),
+            ("/Keep/lost.txt", 2, "u-lost", "sha-lost"),
+            ("/Keep/bad.txt", 5, "u-bad", "sha-bad"),
+            ("/Keep/hash.txt", 4, "u-hash", "sha-mirror"),
         ],
     )
     _snapshot(
@@ -81,9 +99,10 @@ def test_reconcile_drops_missing_or_missized_and_trashes_strays(
     snapshot_id = _snapshot(
         ctx.state,
         [
-            ("Keep/ok.txt", "u-ok", 3),
-            ("Keep/bad.txt", "u-bad", 99),
+            ("Keep/ok.txt", "u-ok", 3, "sha-ok"),
+            ("Keep/bad.txt", "u-bad", 99, "sha-bad"),
             ("Keep/pending.txt", "u-p", 7),
+            ("Keep/hash.txt", "u-hash", 4, "sha-proton"),
             ("Stray/x.bin", "u-stray", 1),
         ],
     )
@@ -94,8 +113,8 @@ def test_reconcile_drops_missing_or_missized_and_trashes_strays(
         (),
         {
             "root_uid": lambda self, phase: "uid-destination",
-            "inventory": lambda self, purpose, phase, reuse_complete=True: (
-                walked.append((purpose, reuse_complete)) or snapshot_id
+            "inventory": lambda self, purpose, phase, reuse_complete=True, deadline=None: (
+                walked.append((purpose, reuse_complete, deadline)) or snapshot_id
             ),
             "trash": lambda self, paths, phase: trashed.extend(paths),
         },
@@ -105,9 +124,13 @@ def test_reconcile_drops_missing_or_missized_and_trashes_strays(
     monkeypatch.setattr(p60_reconcile.session, "writeback", lambda *a: False)
     result = p60_reconcile.run(ctx)
     # A stable purpose with reuse_complete=False resumes a killed walk across runs and
-    # still refuses last week's COMPLETE one.
-    assert walked == [("reconcile", False)]
-    assert result.outputs["dropped"] == 2 and result.outputs["strays_trashed"] == 1
+    # still refuses last week's COMPLETE one; the deadline leaves ten minutes for the
+    # rest of the run.
+    assert walked == [("reconcile", False, 1 + 1 * 60 - 600)]
+    assert result.outputs["dropped"] == 3
+    assert result.outputs["sha1_mismatch"] == 1
+    assert result.outputs["matched"] == 1
+    assert result.outputs["strays_trashed"] == 1
     assert result.outputs["uid_refreshed"] == 1
     assert trashed == ["/my-files/Dropbox/Stray/x.bin"]
     left = {
@@ -121,6 +144,79 @@ def test_reconcile_drops_missing_or_missized_and_trashes_strays(
         ).fetchone()[0]
         == 1
     )
+    fields = _figures_event(ctx.state)
+    assert fields["complete"] == 1
+    assert fields["snapshot_id"] == snapshot_id
+    assert fields["matched"] == 1
+    assert fields["dropped"] == 3
+    assert fields["uid_refreshed"] == 1
+    assert fields["strays_trashed"] == 1
+
+
+def test_reconcile_partial_walk_pushes_state_and_touches_nothing(
+    state_context, monkeypatch, plain_crypt
+):
+    ctx = _ctx(state_context)
+    inventory_id = seed_api_inventory(ctx.state, "run:1", [])
+    ctx.state.update_run(ctx.run_id, inventory_id=inventory_id)
+    _mirror(ctx.state, [("/Keep/ok.txt", 3, "u-ok")])
+    with ctx.state.connection:
+        cursor = ctx.state.connection.execute(
+            """INSERT INTO proton_snapshots(purpose, started_at, status, destination_root, cli_version)
+               VALUES ('reconcile', 'now', 'RUNNING', '/my-files/Dropbox', '0.8.0')"""
+        )
+        snapshot_id = int(cursor.lastrowid)
+        ctx.state.connection.execute(
+            """INSERT INTO proton_folders(snapshot_id, uid, parent_uid, visible_segments_json, cli_path, status)
+               VALUES (?, '__ROOT__', NULL, '[]', '/my-files/Dropbox', 'COMPLETE')""",
+            (snapshot_id,),
+        )
+        ctx.state.connection.execute(
+            """INSERT INTO proton_folders(snapshot_id, uid, parent_uid, visible_segments_json, cli_path, status)
+               VALUES (?, 'u-a', '__ROOT__', '["A"]', '/my-files/Dropbox/A', 'PENDING')""",
+            (snapshot_id,),
+        )
+
+    def _refuse_trash(self, paths, phase):
+        raise AssertionError("a partial walk must not trash anything")
+
+    fake = type(
+        "P",
+        (),
+        {
+            "root_uid": lambda self, phase: "uid-destination",
+            "inventory": lambda self, purpose, phase, reuse_complete=True, deadline=None: (
+                snapshot_id
+            ),
+            "trash": _refuse_trash,
+        },
+    )()
+    pushed = []
+    monkeypatch.setattr(p60_reconcile, "ProtonCLIProvider", lambda *a, **k: fake)
+    monkeypatch.setattr(p60_reconcile, "Store", lambda runtime, paths: FakeStore())
+    monkeypatch.setattr(p60_reconcile.session, "writeback", lambda *a: False)
+    monkeypatch.setattr(
+        p60_reconcile.statefile,
+        "push",
+        lambda state, runtime, paths, store, label: pushed.append(label),
+    )
+    result = p60_reconcile.run(ctx)
+    assert result.status == "PASS"
+    assert result.outputs == {"partial": 1}
+    assert pushed == ["1-reconcile"]
+    left = {
+        r["path_lower"]
+        for r in ctx.state.connection.execute("SELECT * FROM mirror_objects")
+    }
+    assert left == {"/keep/ok.txt"}
+    fields = _figures_event(ctx.state)
+    assert fields["complete"] == 0
+    assert fields["snapshot_id"] == snapshot_id
+    assert fields["folders_listed"] == 1
+    assert fields["folders_pending"] == 1
+    assert fields["proton_files"] == 0
+    assert fields["dropped"] == 0
+    assert fields["strays_trashed"] == 0
 
 
 def test_reconcile_skips_when_not_scheduled(state_context, monkeypatch, plain_crypt):

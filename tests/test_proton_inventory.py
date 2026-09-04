@@ -159,6 +159,47 @@ def test_incomplete_upload_inventory_resumes_existing_folder_queue(state_context
     )
 
 
+def test_deadline_stops_the_walk_between_folders_and_resumes(state_context):
+    cfg, _, state, logger, _ = state_context
+    root = cfg.proton.destination
+
+    def runner(argv, **kwargs):
+        if argv[-1] == "version":
+            return subprocess.CompletedProcess(argv, 0, "cli-drive@0.8.0\n", "")
+        if argv[-1] == root:
+            payload = [
+                {"uid": "uid-a", "name": "A", "type": "folder"},
+                {"uid": "uid-b", "name": "B", "type": "folder"},
+            ]
+        else:
+            payload = []
+        return subprocess.CompletedProcess(argv, 0, json.dumps(payload), "")
+
+    provider = ProtonCLIProvider(cfg, state, logger, run=runner, sleep=lambda _: None)
+    first = provider.inventory(
+        "reconcile", "60_reconcile", reuse_complete=False, deadline=0
+    )
+    row = state.connection.execute(
+        "SELECT status FROM proton_snapshots WHERE id=?", (first,)
+    ).fetchone()
+    assert row["status"] == "RUNNING"
+    pending = {
+        r["uid"]
+        for r in state.connection.execute(
+            "SELECT uid FROM proton_folders WHERE snapshot_id=? AND status='PENDING'",
+            (first,),
+        )
+    }
+    assert pending == {"uid-a", "uid-b"}
+
+    second = provider.inventory("reconcile", "60_reconcile", reuse_complete=False)
+    assert second == first
+    status = state.connection.execute(
+        "SELECT status FROM proton_snapshots WHERE id=?", (second,)
+    ).fetchone()["status"]
+    assert status == "COMPLETE"
+
+
 def test_wrapped_fields_and_path_escaping():
     assert unwrap({"ok": True, "value": 42}) == 42
     assert unwrap({"ok": False, "error": "x"}) is None

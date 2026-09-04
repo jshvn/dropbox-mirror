@@ -230,7 +230,12 @@ class ProtonCLIProvider:
         return result
 
     def inventory(
-        self, purpose: str, phase: str, *, reuse_complete: bool = True
+        self,
+        purpose: str,
+        phase: str,
+        *,
+        reuse_complete: bool = True,
+        deadline: float | None = None,
     ) -> int:
         connection = self.state.connection
         version = self.version()
@@ -410,6 +415,8 @@ class ProtonCLIProvider:
                 object_identifier=cli_path,
                 entries=len(children),
             )
+            if deadline is not None and time.time() >= deadline:
+                break
         return snapshot_id
 
     def upload_tree(self, sources: list[Path], destination: str, phase: str) -> str:
