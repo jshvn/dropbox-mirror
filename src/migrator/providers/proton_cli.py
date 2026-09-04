@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
+import threading
 import time
 from collections import Counter
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -65,6 +68,47 @@ def _category(stderr: str, returncode: int) -> str:
     return f"EXIT_{returncode}"
 
 
+# A transfer prints its summary when the work is done and then disposes event
+# subscriptions and telemetry; on a large upload that shutdown has been seen never
+# to return. The summary line is the completion signal; the grace is how long the
+# process gets to exit on its own before it is terminated.
+EXIT_GRACE_SECONDS = 60.0
+KILL_GRACE_SECONDS = 10.0
+POLL_SECONDS = 1.0
+UPLOAD_DONE_MARKER = '"transferredItems"'
+DOWNLOAD_DONE_MARKER = "Downloaded:"
+CLI_LOG_NAME = "proton-drive.log"
+
+
+@dataclass(frozen=True)
+class Streamed:
+    returncode: int
+    stdout: str
+    stderr: str
+    terminated_after_done: bool = False
+
+
+def cli_log_tail(limit: int = 6000) -> str:
+    """The tail of the CLI's own log in its cache directory: the only account of a
+    transfer that printed nothing, kept in the encrypted state like other raw errors."""
+    cache = os.environ.get("PROTON_DRIVE_CACHE_DIR")
+    if not cache:
+        return ""
+    try:
+        data = (Path(cache) / CLI_LOG_NAME).read_bytes()
+    except OSError:
+        return ""
+    return data[-limit:].decode("utf-8", "replace")
+
+
+def _evidence(stderr: Any) -> str:
+    text = stderr or ""
+    if isinstance(text, bytes):
+        text = text.decode("utf-8", "replace")
+    tail = cli_log_tail()
+    return text[-4000:] + ("\n--- proton-drive.log ---\n" + tail if tail else "")
+
+
 class ProtonCLIProvider:
     def __init__(
         self,
@@ -73,6 +117,8 @@ class ProtonCLIProvider:
         logger: RunLogger,
         *,
         run: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+        popen: Callable[..., Any] = subprocess.Popen,
+        clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
         after_call: Callable[[], None] | None = None,
     ) -> None:
@@ -80,8 +126,74 @@ class ProtonCLIProvider:
         self.state = state
         self.logger = logger
         self.run = run
+        self.popen = popen
+        self.clock = clock
         self.sleep = sleep
         self.after_call = after_call
+
+    def _stream(self, argv: list[str], *, timeout: float, done_marker: str) -> Streamed:
+        """Run a transfer, watching stdout for its summary line. A process that has
+        printed the summary but not exited within EXIT_GRACE_SECONDS is terminated and
+        reported as done; one that prints nothing within `timeout` raises TimeoutExpired
+        carrying whatever it wrote."""
+        proc = self.popen(
+            argv, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=1
+        )
+        out: list[str] = []
+        err: list[str] = []
+        done_at: list[float] = []
+
+        def read_out() -> None:
+            for line in proc.stdout:
+                out.append(line)
+                if done_marker in line and not done_at:
+                    done_at.append(self.clock())
+
+        def read_err() -> None:
+            err.append(proc.stderr.read())
+
+        threads = [
+            threading.Thread(target=read_out, daemon=True),
+            threading.Thread(target=read_err, daemon=True),
+        ]
+        for thread in threads:
+            thread.start()
+        deadline = self.clock() + timeout
+        terminated = False
+        while True:
+            try:
+                proc.wait(timeout=POLL_SECONDS)
+                break
+            except subprocess.TimeoutExpired:
+                now = self.clock()
+                if done_at and now - done_at[0] > EXIT_GRACE_SECONDS:
+                    self._terminate(proc)
+                    terminated = True
+                    break
+                if now > deadline:
+                    self._terminate(proc)
+                    for thread in threads:
+                        thread.join(5)
+                    raise subprocess.TimeoutExpired(
+                        argv, timeout, output="".join(out), stderr="".join(err)
+                    )
+        for thread in threads:
+            thread.join(5)
+        return Streamed(
+            0 if terminated else int(proc.returncode),
+            "".join(out),
+            "".join(err),
+            terminated,
+        )
+
+    @staticmethod
+    def _terminate(proc: Any) -> None:
+        proc.terminate()
+        try:
+            proc.wait(timeout=KILL_GRACE_SECONDS)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=KILL_GRACE_SECONDS)
 
     def _after(self) -> None:
         if self.after_call is not None:
@@ -464,17 +576,14 @@ class ProtonCLIProvider:
             )
             try:
                 try:
-                    result = self.run(
+                    result = self._stream(
                         argv,
-                        text=True,
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.PIPE,
-                        check=False,
                         timeout=self.cfg.proton.transfer_timeout_seconds,
+                        done_marker=DOWNLOAD_DONE_MARKER,
                     )
                 finally:
                     self._after()
-            except subprocess.TimeoutExpired:
+            except subprocess.TimeoutExpired as exc:
                 self.state.record_command_end(command_id, -1, "TIMEOUT")
                 self.logger.warning(
                     phase,
@@ -482,6 +591,7 @@ class ProtonCLIProvider:
                     "Proton CLI download timed out and will be retried",
                     retry_count=attempt,
                     provider_category="TIMEOUT",
+                    raw_error=_evidence(exc.stderr),
                 )
                 if attempt < self.cfg.proton.download_max_attempts:
                     shutil.rmtree(local_parent)
@@ -496,6 +606,14 @@ class ProtonCLIProvider:
                 else _category(result.stderr, result.returncode)
             )
             self.state.record_command_end(command_id, result.returncode, category)
+            if result.terminated_after_done:
+                self.logger.warning(
+                    phase,
+                    "download",
+                    "Proton CLI download printed its summary but did not exit; terminated",
+                    provider_category="HUNG_AFTER_DONE",
+                    raw_error=_evidence(result.stderr),
+                )
             if result.returncode == 0:
                 return
             self.logger.warning(
@@ -529,29 +647,31 @@ class ProtonCLIProvider:
         )
         try:
             try:
-                result = self.run(
-                    argv,
-                    text=True,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    check=False,
-                    timeout=timeout,
-                )
+                if operation == "upload":
+                    result: Any = self._stream(
+                        argv, timeout=timeout, done_marker=UPLOAD_DONE_MARKER
+                    )
+                else:
+                    result = self.run(
+                        argv,
+                        text=True,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        check=False,
+                        timeout=timeout,
+                    )
             finally:
                 self._after()
         except subprocess.TimeoutExpired as exc:
             self.state.record_command_end(command_id, -1, "TIMEOUT")
-            # The CLI prints nothing on stdout until it finishes, so its stderr tail
-            # is the only account of a stalled transfer; the state carries it to R2.
-            stderr = exc.stderr or ""
-            if isinstance(stderr, bytes):
-                stderr = stderr.decode("utf-8", "replace")
+            # The CLI prints nothing on stdout until it finishes, so its stderr and its
+            # own log are the only account of a stalled transfer; the state carries them.
             self.logger.error(
                 phase,
                 operation,
                 f"official Proton CLI mutation timed out after {int(timeout)} s",
                 provider_category="TIMEOUT",
-                raw_error=stderr[-4000:],
+                raw_error=_evidence(exc.stderr),
             )
             raise ProtonCLIError(f"Proton {operation} timed out") from exc
         category = (
@@ -560,6 +680,15 @@ class ProtonCLIProvider:
             else _category(result.stderr, result.returncode)
         )
         self.state.record_command_end(command_id, result.returncode, category)
+        if getattr(result, "terminated_after_done", False):
+            self.logger.warning(
+                phase,
+                operation,
+                "official Proton CLI mutation printed its summary but did not exit; "
+                f"terminated after {int(EXIT_GRACE_SECONDS)} s",
+                provider_category="HUNG_AFTER_DONE",
+                raw_error=_evidence(result.stderr),
+            )
         if result.returncode not in accepted or category == "AUTH":
             self.logger.error(
                 phase,
