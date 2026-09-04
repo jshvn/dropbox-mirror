@@ -29,8 +29,7 @@ atomic writes, redacting logger, path guards, and the two providers for the Drop
 and the official `proton-drive` CLI) come from
 [donphi/dropbox_proton](https://github.com/donphi/dropbox_proton) at commit `cfd0e57`,
 MIT, whose copyright notice is retained in [LICENSE](LICENSE). The mirror phases, the
-Taskfile, the toolbox image, and the workflows are this repo's own. The design and its
-research live in [docs/superpowers/specs/](docs/superpowers/specs/).
+Taskfile, the toolbox image, and the workflows are this repo's own.
 
 ## 🧭 How it works
 
@@ -473,6 +472,5 @@ docker/Dockerfile         the toolbox image; the repo is bind-mounted at /work
 src/migrator/             the package: commands, phases/, providers/, state, store, crypt, session
 tests/                    pytest suite, no network; tests/fixtures/live/ is ignored by git
 .github/workflows/        sync.yml (dispatch-only, self-chaining), check.yml (pull requests)
-docs/superpowers/         the design spec and its research
 .run/                     work directory at run time; ignored by git, removed by task clean
 ```

@@ -3,7 +3,6 @@
 # Invariant: every step runs inside the toolbox image, on a laptop and in CI
 # alike, and R2 holds the only record of how far the mirror has got. Secrets
 # reach processes by name from 1Password (op.env); nothing is written to disk.
-# Design: docs/superpowers/specs/2026-09-03-dropbox-mirror-design.md
 version: '3'
 
 vars:
