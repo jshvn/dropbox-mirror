@@ -155,7 +155,7 @@ def test_figures_and_markdown_carry_counts_never_names(
     assert figures["verification"] == {
         "confirmed_this_run": 1,
         "confirm_failed": 0,
-        "files_proven_cumulative": 1,
+        "files_confirmed_cumulative": 1,
         "reconcile_walk": "complete",
         "reconcile_matched": 1,
         "reconcile_dropped": 0,
@@ -193,7 +193,7 @@ def test_report_marks_failed_run_and_writes_no_chain(
     assert p70_report.figures(ctx)["verification"] == {
         "confirmed_this_run": 1,
         "confirm_failed": 0,
-        "files_proven_cumulative": 1,
+        "files_confirmed_cumulative": 1,
         "reconcile_walk": "n/a",
         "reconcile_matched": "n/a",
         "reconcile_dropped": "n/a",

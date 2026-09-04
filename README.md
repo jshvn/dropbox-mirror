@@ -4,7 +4,7 @@ A nightly, self-chaining GitHub Actions pipeline that mirrors a Dropbox account 
 Proton Drive. Every night Proton Drive comes to hold what Dropbox held at listing time,
 under one folder of your choosing (`/my-files/Dropbox` by default). Changed files become
 new Proton revisions, files that left Dropbox move to Proton's trash, and nothing is
-recorded as mirrored until Proton's own upload summary has confirmed it by listing. The
+recorded as mirrored until Proton's own upload summary has accounted for it. The
 only durable state is one SQLite database, age-encrypted in a Cloudflare R2 bucket; no
 run is ever told where to start.
 

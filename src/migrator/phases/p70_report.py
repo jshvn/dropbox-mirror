@@ -224,7 +224,7 @@ def figures(ctx: PhaseContext) -> dict[str, Any]:
         "verification": {
             "confirmed_this_run": _sum(details, "confirmed"),
             "confirm_failed": _sum(details, "confirm_failed"),
-            "files_proven_cumulative": cumulative_verified,
+            "files_confirmed_cumulative": cumulative_verified,
             **reconcile_fields,
         },
         "phases": {row["phase_name"]: row["status"] for row in phases},
