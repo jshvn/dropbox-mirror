@@ -65,6 +65,15 @@ def test_upload_tree_failure_raises_and_still_hooks(state_context, tmp_path):
     assert hooks == [1]
 
 
+def test_list_stops_retrying_on_an_auth_failure(state_context):
+    cfg, _, state, logger, _ = state_context
+    run, calls = _fake_run([(1, "", "You need to login first")] * 8)
+    provider = ProtonCLIProvider(cfg, state, logger, run=run, sleep=lambda _: None)
+    with pytest.raises(ProtonCLIError, match="AUTH"):
+        provider.list_folder("/my-files/Dropbox", "40_batches")
+    assert len(calls) == 1
+
+
 def test_trash_passes_every_path_in_one_call(state_context):
     cfg, _, state, logger, _ = state_context
     run, calls = _fake_run([(0, "", "")])

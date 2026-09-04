@@ -152,6 +152,18 @@ class ProtonCLIProvider:
                     raise ProtonCLIError(
                         f"Proton {operation} returned invalid JSON"
                     ) from exc
+            if category == "AUTH":
+                # A dead session is not a transient failure: retrying it only delays the
+                # loud stop the operator has to act on.
+                self.logger.error(
+                    phase,
+                    operation,
+                    "Proton CLI operation failed on authentication",
+                    retry_count=attempt,
+                    provider_category=category,
+                    raw_error=result.stderr[-4000:],
+                )
+                raise ProtonCLIError(f"Proton {operation} failed (AUTH)")
             self.logger.warning(
                 phase,
                 operation,
@@ -551,5 +563,16 @@ class ProtonCLIProvider:
             )
             raise ProtonCLIError(
                 f"Proton {operation} failed ({category}): {result.stderr[-4000:]}"
+            )
+        if result.returncode != 0:
+            # An accepted non-zero exit means the CLI handled some items and refused
+            # others; confirm adjudicates each file, and this is the only account of why
+            # a particular one was refused.
+            self.logger.warning(
+                phase,
+                operation,
+                f"official Proton CLI mutation exited {result.returncode} and was accepted",
+                provider_category=category,
+                raw_error=result.stderr[-4000:],
             )
         return result.stdout
