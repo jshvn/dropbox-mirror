@@ -59,7 +59,7 @@ def run(ctx: PhaseContext) -> PhaseResult:
         ).fetchone()[0]
     )
     mirrored, _ = ctx.state.mirror_totals()
-    floor = int(mirrored * ctx.cfg.budget.listing_floor_ratio)
+    floor = max(1, int(mirrored * ctx.cfg.budget.listing_floor_ratio))
     if mirrored and listed < floor:
         raise PhaseError(
             f"listing has {listed} files, under the floor of {floor}; a truncated listing "

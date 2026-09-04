@@ -103,6 +103,15 @@ def test_listing_floor_refuses_truncated_listing(state_context):
         p20_delta.run(ctx)
 
 
+def test_floor_never_rounds_to_zero_for_a_one_file_mirror(state_context):
+    ctx = _ctx(state_context)
+    inventory_id = seed_api_inventory(ctx.state, "run:1", [])
+    ctx.state.update_run(ctx.run_id, inventory_id=inventory_id)
+    _mirror(ctx.state, [("/only.txt", "/Only.txt", 1, "h")])
+    with pytest.raises(PhaseError, match="floor"):
+        p20_delta.run(ctx)
+
+
 def test_first_run_has_no_floor(state_context):
     ctx = _ctx(state_context)
     inventory_id = seed_api_inventory(
