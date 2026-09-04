@@ -37,8 +37,8 @@ def _batch_details(ctx: PhaseContext) -> list[dict[str, Any]]:
 def _throttling(
     ctx: PhaseContext, provider_phase_like: str, command_provider: str, since: str
 ) -> dict[str, float]:
-    """This run only: `since` is runs.started_at, and the evidence tables carry no run id.
-    (`commands.started_at` per the donor DDL, Task 4 step 5.)"""
+    """This run only: `since` is runs.started_at, and the evidence tables carry no run id,
+    so `commands.started_at` is compared directly."""
     connection = ctx.state.connection
     waits = [
         float(json.loads(row["fields_json"] or "{}").get("wait_seconds") or 0)
@@ -228,12 +228,12 @@ def render(fig: dict[str, Any], status: str) -> str:
 def run(ctx: PhaseContext) -> PhaseResult:
     label = f"{history_label(ctx)}-report"  # before finish_run: current_run() needs the RUNNING row
     fig = figures(ctx)
-    status = "FAIL" if fig["failed_phases"] else "SUCCESS"
-    ctx.paths.report.write_text(render(fig, status), encoding="utf-8")
+    run_status = "FAIL" if fig["failed_phases"] else "SUCCESS"
+    ctx.paths.report.write_text(render(fig, run_status), encoding="utf-8")
     ctx.paths.chain.unlink(missing_ok=True)
-    if fig["mirror"]["chain"] and status == "SUCCESS":
+    if fig["mirror"]["chain"] and run_status == "SUCCESS":
         ctx.paths.chain.write_text("chain\n", encoding="utf-8")
-    ctx.state.finish_run(ctx.run_id, status)
+    ctx.state.finish_run(ctx.run_id, run_status)
     ctx.logger.info(PHASE, "figures", "run figures", **fig)
     if ctx.apply:
         # The run row, its figures event and the final status exist only here until pushed.
@@ -244,11 +244,14 @@ def run(ctx: PhaseContext) -> PhaseResult:
             Store(ctx.runtime, ctx.paths),
             label=label,
         )
-    # The phase status is the run status: a FAIL run stops `task pipeline` before `ping`.
+    # PhaseResult.status is "PASS" when the run finished SUCCESS and "FAIL" otherwise,
+    # matching every other phase's status vocabulary; outputs["status"] and runs.status
+    # (via finish_run) keep "SUCCESS"/"FAIL". A FAIL phase status stops `task pipeline`
+    # before it reaches `ping`.
     return PhaseResult(
-        status=status,
+        status="PASS" if run_status == "SUCCESS" else "FAIL",
         outputs={
-            "status": status,
+            "status": run_status,
             "chain": fig["mirror"]["chain"],
             "report": str(ctx.paths.report),
         },

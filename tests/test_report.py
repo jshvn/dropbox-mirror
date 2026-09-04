@@ -148,6 +148,7 @@ def test_figures_and_markdown_carry_counts_never_names(
     assert "Taxes" not in text and "a.pdf" not in text
     assert "percent mirrored" in text.lower() and "66.7" in text
     assert ctx.paths.chain.exists()
+    assert result.status == "PASS"
     assert result.outputs["status"] == "SUCCESS"
     row = ctx.state.connection.execute(
         "SELECT status FROM runs WHERE id=?", (ctx.run_id,)
@@ -177,3 +178,7 @@ def test_report_marks_failed_run_and_writes_no_chain(
     assert result.status == "FAIL" and result.outputs["status"] == "FAIL"
     assert not ctx.paths.chain.exists()
     assert "FAIL" in ctx.paths.report.read_text(encoding="utf-8")
+    row = ctx.state.connection.execute(
+        "SELECT status FROM runs WHERE id=?", (ctx.run_id,)
+    ).fetchone()
+    assert row["status"] == "FAIL"
