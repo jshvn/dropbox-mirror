@@ -30,7 +30,6 @@ class Store:
         if not runtime.r2_bucket:
             raise StoreError("required secret is unset: MIRROR_R2_BUCKET")
         self.bucket = runtime.r2_bucket
-        self.paths = paths
         self.client = client if client is not None else self._build_client(runtime)
 
     @staticmethod

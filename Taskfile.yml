@@ -22,9 +22,8 @@ vars:
   RUN_EPOCH:
     sh: date +%s
 
-# Run-scoped environment for the step tasks below. The rclone remote literals are ENV
-# lines in the Dockerfile so that every in-toolbox command sees them, wrapped by an
-# inner `task` or not.
+# Run-scoped environment for the step tasks below. AWS_REGION is an ENV line in the
+# Dockerfile so that every in-toolbox command sees it, wrapped by an inner `task` or not.
 env:
   MIRROR_RUN_EPOCH: '{{.RUN_EPOCH}}'
   MIRROR_WORK_DIR: .run

@@ -55,13 +55,10 @@ def run(ctx: PhaseContext) -> PhaseResult:
     free = shutil.disk_usage(ctx.paths.root).free
     needed = (
         min(budget.batch_bytes, sum(int(r["size"]) for r in rows))
-        + largest
         + budget.headroom_bytes
     )
     if largest and free < needed:
-        raise PhaseError(
-            f"disk cannot hold a batch plus its round-trip copy: {free} free, {needed} needed"
-        )
+        raise PhaseError(f"disk cannot hold a batch: {free} free, {needed} needed")
     batches = pack(rows, budget.batch_bytes, budget.batch_files)
     with connection:
         # A PLANNED batch from any run was never executed; each run re-plans from the

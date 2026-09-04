@@ -120,11 +120,11 @@ def test_plan_refuses_tree_over_ceiling(state_context, monkeypatch):
         p30_plan.run(ctx)
 
 
-def test_plan_refuses_file_disk_cannot_hold_twice(state_context, monkeypatch):
+def test_plan_refuses_batch_disk_cannot_hold_staging(state_context, monkeypatch):
     ctx = _ctx(state_context, Budget(batch_gb=1, ceiling_gb=1, disk_headroom_gb=0))
     _changed(ctx, [("/a", 600)])
     monkeypatch.setattr(
-        p30_plan.shutil, "disk_usage", lambda _: type("U", (), {"free": 1000})()
+        p30_plan.shutil, "disk_usage", lambda _: type("U", (), {"free": 500})()
     )
     with pytest.raises(PhaseError, match="disk"):
         p30_plan.run(ctx)

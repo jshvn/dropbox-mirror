@@ -24,7 +24,7 @@ def test_restore_requires_object(runtime_factory, tmp_path, plain_crypt):
         session.restore(runtime, paths, FakeStore())
 
 
-def test_seal_then_restore_round_trips_files(runtime_factory, tmp_path, plain_crypt):
+def test_seal_then_restore_recovers_files(runtime_factory, tmp_path, plain_crypt):
     runtime, paths = _ready(runtime_factory, tmp_path)
     laptop = tmp_path / "pd"
     laptop.mkdir()
