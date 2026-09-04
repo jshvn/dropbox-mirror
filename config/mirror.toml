@@ -16,7 +16,7 @@ transfers = 4
 
 [proton]
 destination = "/my-files/Dropbox"
-expected_destination_uid = "JG4skepsXf6_Nf3Nq9wCXskuwJ_P3SvU-gNQ-rcIs5AHh26CkLOIp_ldF1tqcQACNfBDf6gefBWlqx3_C--e6w==~C2RXpKCKx4Ca638uit6L1SYLQzq9e8gT0JERvcyQ3fgmeoQyCP6WKxYkqRwHmwrhDcYG7OR-I1z80RyRuaBFMA=="
+expected_destination_uid = "JG4skepsXf6_Nf3Nq9wCXskuwJ_P3SvU-gNQ-rcIs5AHh26CkLOIp_ldF1tqcQACNfBDf6gefBWlqx3_C--e6w==~9adM7wIv95xzYRt5q1mJMuIiOz8koFpYd9HzHeumL1nof1Urt886RX8r1V4A240yrWluyEGBXqnrZ-zel-2TFQ=="
 
 [budget]
 batch_gb = 4
