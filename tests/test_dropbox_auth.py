@@ -36,7 +36,9 @@ def test_exchanges_refresh_token(config_factory, runtime_factory, tmp_path):
     assert auth == ("app-key", "app-secret")
 
 
-def test_rejects_failure_without_leaking_body(config_factory, runtime_factory, tmp_path):
+def test_rejects_failure_without_leaking_body(
+    config_factory, runtime_factory, tmp_path
+):
     cfg = config_factory(tmp_path)
     runtime = runtime_factory(tmp_path)
     session = _Session(_Response(400, {"error": "invalid_grant"}))

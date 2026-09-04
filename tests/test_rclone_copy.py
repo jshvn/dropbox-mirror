@@ -23,7 +23,9 @@ def test_copy_accepts_vanished_exit_codes(state_context, tmp_path):
     provider = DropboxRcloneProvider(cfg, paths, state, logger, run=run)
     listing = tmp_path / "files.txt"
     listing.write_text("A/b.txt\n", encoding="utf-8")
-    code = provider.copy_files_from(listing, tmp_path / "staging", tmp_path / "copy.jsonl")
+    code = provider.copy_files_from(
+        listing, tmp_path / "staging", tmp_path / "copy.jsonl"
+    )
     assert code == 3
     argv = calls[0]
     assert "--files-from-raw" in argv and "--no-traverse" in argv
