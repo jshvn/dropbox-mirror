@@ -46,7 +46,7 @@ def main(argv: list[str] | None = None) -> int:
         return int(COMMANDS[args.command](runtime, args.args))  # type: ignore[operator]
     except Exception as exc:  # noqa: BLE001 - every class: a traceback would print provider stderr
         # Error text may carry provider stderr with path names; CI sees the class only.
-        detail = f": {exc}" if runtime.verbose else ""
+        detail = runtime.redact(f": {exc}") if runtime.verbose else ""
         print(f"ERROR: {type(exc).__name__}{detail}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:

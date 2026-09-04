@@ -98,3 +98,23 @@ def test_main_hides_error_text_unless_verbose(state_context, monkeypatch, capsys
     assert main(["probe"]) == 1
     err = capsys.readouterr().err
     assert "PhaseError" in err and "secret.pdf" not in err
+
+
+def test_main_verbose_error_text_is_redacted(state_context, monkeypatch, capsys):
+    from dataclasses import replace
+
+    from migrator.__main__ import main
+
+    runtime = replace(
+        _prepare(state_context), verbose=True, dropbox_account_id="dbid:real-account"
+    )
+
+    def probe(ctx: PhaseContext) -> PhaseResult:
+        raise PhaseError("account guard failed: got dbid:real-account")
+
+    _register(monkeypatch, probe)
+    monkeypatch.setattr(runner, "load_config", lambda _: state_context[0])
+    monkeypatch.setattr("migrator.__main__.Runtime.from_environ", lambda: runtime)
+    assert main(["probe"]) == 1
+    err = capsys.readouterr().err
+    assert "account guard failed" in err and "dbid:real-account" not in err

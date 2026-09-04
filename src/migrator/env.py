@@ -34,6 +34,8 @@ class Runtime:
     aws_access_key_id: str
     aws_secret_access_key: str
     aws_endpoint_url: str
+    dropbox_account_id: str
+    proton_destination_uid: str
     host: str
 
     @classmethod
@@ -56,15 +58,28 @@ class Runtime:
             aws_access_key_id=env.get("AWS_ACCESS_KEY_ID", ""),
             aws_secret_access_key=env.get("AWS_SECRET_ACCESS_KEY", ""),
             aws_endpoint_url=env.get("AWS_ENDPOINT_URL_S3", ""),
+            dropbox_account_id=env.get("MIRROR_DROPBOX_ACCOUNT_ID", ""),
+            proton_destination_uid=env.get("MIRROR_PROTON_DESTINATION_UID", ""),
             host=f"github:{run_id}" if run_id else socket.gethostname(),
         )
 
     def secrets(self) -> list[str]:
+        """Every value that must never reach a log: credentials, and the
+        identifiers that name the accounts (the repo and its logs are public)."""
         values = (
             self.age_identity,
             self.healthcheck_url,
             self.dropbox_app_secret,
             self.dropbox_refresh_token,
+            self.aws_access_key_id,
             self.aws_secret_access_key,
+            self.aws_endpoint_url,
+            self.dropbox_account_id,
+            self.proton_destination_uid,
         )
         return [value for value in values if value]
+
+    def redact(self, text: str) -> str:
+        for value in sorted(self.secrets(), key=len, reverse=True):
+            text = text.replace(value, "[redacted]")
+        return text

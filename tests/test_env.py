@@ -31,8 +31,22 @@ def test_defaults_and_secrets():
         "https://hc/ping/x",
         "s",
         "r",
+        "ak",
         "r2s",
+        "https://accountid.r2.cloudflarestorage.com",
     }
+
+
+def test_account_identifiers_are_secrets_and_redacted():
+    env = {
+        "MIRROR_DROPBOX_ACCOUNT_ID": "dbid:real-account",
+        "MIRROR_PROTON_DESTINATION_UID": "uid-real-folder",
+        "AWS_ACCESS_KEY_ID": "AKIAREALKEY",
+    }
+    runtime = Runtime.from_environ(env)
+    assert {"dbid:real-account", "uid-real-folder"} <= set(runtime.secrets())
+    text = "expected dbid:real-account under uid-real-folder at AKIAREALKEY"
+    assert runtime.redact(text) == "expected [redacted] under [redacted] at [redacted]"
 
 
 def test_overrides_and_host():
