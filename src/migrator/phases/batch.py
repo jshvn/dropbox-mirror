@@ -5,6 +5,7 @@ import json
 import os
 import shutil
 import sqlite3
+import time
 from collections import Counter, defaultdict
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -23,6 +24,10 @@ from ..store import Store
 from .base import PhaseContext, PhaseError
 
 PHASE = "40_batches"
+now = time.time
+# The round-trip stops this far short of the run budget so checkpoint, trash and report
+# still have room; a batch left part-way keeps its CONFIRMED rows for the next run.
+ROUNDTRIP_MARGIN_SECONDS = 600
 
 
 def items(
@@ -39,6 +44,9 @@ def items(
 def _set_item(
     ctx: PhaseContext, batch_id: int, path_lower: str, status: str, **columns: Any
 ) -> None:
+    # ponytail: one commit per row, so a killed step loses at most the row in flight.
+    # The ceiling is one fsync per file per step; the upgrade path is to batch the status
+    # writes per step and commit once at its end.
     assignments = ", ".join(["status=?", *(f"{name}=?" for name in columns)])
     with ctx.state.connection:
         ctx.state.connection.execute(
@@ -215,7 +223,13 @@ def upload(ctx: PhaseContext, proton: Any, batch_id: int) -> dict[str, int]:
     if not rows:
         return {"uploaded_files": 0, "uploaded_bytes": 0}
     sources = sorted(path for path in ctx.paths.staging.iterdir())
-    proton.upload_tree(sources, ctx.cfg.proton.destination, PHASE)
+    stdout = proton.upload_tree(sources, ctx.cfg.proton.destination, PHASE)
+    # The CLI reports a partly refused upload as a non-zero exit with a per-item report on
+    # stdout. Confirm turns a refusal into CONFIRM_FAILED: absent; this file is the only
+    # place that says why, so it is kept as a phase artifact.
+    report = ctx.phase_dir(PHASE) / f"upload-{batch_id}.json"
+    report.write_text(stdout or "", encoding="utf-8")
+    ctx.state.record_artifact(ctx.phase_run_id, "upload_report", report, ctx.paths.root)
     total = sum(int(r["size"]) for r in rows)
     ctx.logger.info(
         PHASE, "upload", "batch uploaded", batch=batch_id, files=len(rows), bytes=total
@@ -318,8 +332,21 @@ def _downloaded_regular_file(staging: Path) -> Path:
 
 
 def roundtrip(ctx: PhaseContext, proton: Any, batch_id: int) -> dict[str, int]:
+    """One CLI process per file, seconds each, so a large batch can outlast the run
+    budget. Rows not reached stay CONFIRMED and are counted as deferred: checkpoint
+    merges only ROUNDTRIP_OK, and the next run re-plans the remainder, whose upload is a
+    SHA-1 identical skip."""
+    run = ctx.state.current_run()
+    deadline = (
+        int(run["start_epoch"])
+        + int(run["budget_minutes"]) * 60
+        - ROUNDTRIP_MARGIN_SECONDS
+    )
     counts: Counter[str] = Counter()
     for row in items(ctx, batch_id, "CONFIRMED"):
+        if now() >= deadline:
+            counts["deferred"] += 1
+            continue
         staging = (
             ctx.paths.roundtrip
             / hashlib.sha256(str(row["proton_uid"]).encode()).hexdigest()[:16]
@@ -371,6 +398,7 @@ def roundtrip(ctx: PhaseContext, proton: Any, batch_id: int) -> dict[str, int]:
         "roundtrip_ok": counts["roundtrip_ok"],
         "roundtrip_mismatch": counts["roundtrip_mismatch"],
         "roundtrip_bytes": counts["roundtrip_bytes"],
+        "deferred": counts["deferred"],
     }
 
 

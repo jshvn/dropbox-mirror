@@ -24,7 +24,7 @@ def test_defaults_and_derived_bytes(tmp_path):
     cfg = load_config(_write(tmp_path, GOOD))
     assert cfg.rclone.tps_limit == 10
     assert cfg.budget.batch_gb == 4
-    assert cfg.budget.batch_files == 5000
+    assert cfg.budget.batch_files == 1000
     assert cfg.budget.batch_bytes == 4 * 1024**3
     assert cfg.budget.run_budget_minutes == 165
     assert cfg.budget.ceiling_gb == 4000

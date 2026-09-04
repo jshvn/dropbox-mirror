@@ -18,12 +18,18 @@ def _ctx(state_context):
         start_epoch=1,
         hour_utc=0,
         weekday=0,
-        budget_minutes=1,
+        budget_minutes=165,
         host="t",
         reconcile=False,
     )
     phase_run_id = state.start_phase(40, "40_batches", apply=True, inputs={})
     return PhaseContext(cfg, paths, state, logger, True, phase_run_id, run_id, runtime)
+
+
+@pytest.fixture(autouse=True)
+def frozen_clock(monkeypatch):
+    """batch.now is the round-trip's budget clock; pin it inside the budget by default."""
+    monkeypatch.setattr(batch, "now", lambda: 1.0)
 
 
 def _batch(ctx, files: dict[str, bytes]) -> int:
@@ -147,6 +153,23 @@ def test_upload_passes_top_level_children(state_context):
     assert destination == "/my-files/Dropbox"
 
 
+def test_upload_stores_the_cli_report_as_an_artifact(state_context):
+    ctx = _ctx(state_context)
+    files = {"/a.txt": b"aa"}
+    batch_id = _batch(ctx, files)
+    batch.fetch(ctx, FakeRclone(files), batch_id)
+    batch.verify(ctx, batch_id)
+    batch.upload(ctx, FakeProton({}, {}), batch_id)
+    report = ctx.phase_dir("40_batches") / f"upload-{batch_id}.json"
+    assert report.read_text(encoding="utf-8") == '{"ok":true}'
+    row = ctx.state.connection.execute(
+        "SELECT role, relative_path FROM artifacts WHERE phase_run_id=?",
+        (ctx.phase_run_id,),
+    ).fetchone()
+    assert row["role"] == "upload_report"
+    assert row["relative_path"].endswith(f"upload-{batch_id}.json")
+
+
 def test_confirm_matches_name_size_sha1_and_records_uid(state_context):
     ctx = _ctx(state_context)
     files = {"/Docs/a.txt": b"aa", "/Docs/bad.txt": b"bb", "/Docs/missing.txt": b"cc"}
@@ -218,10 +241,56 @@ def test_roundtrip_compares_bytes(state_context):
     )
     batch.confirm(ctx, proton, batch_id)
     counts = batch.roundtrip(ctx, proton, batch_id)
-    assert counts == {"roundtrip_ok": 1, "roundtrip_mismatch": 1, "roundtrip_bytes": 8}
+    assert counts == {
+        "roundtrip_ok": 1,
+        "roundtrip_mismatch": 1,
+        "roundtrip_bytes": 8,
+        "deferred": 0,
+    }
     rows = {r["path_lower"]: r["status"] for r in batch.items(ctx, batch_id)}
     assert rows == {"/a.txt": "ROUNDTRIP_OK", "/b.txt": "ROUNDTRIP_MISMATCH"}
     assert not any(ctx.paths.roundtrip.iterdir())
+
+
+def test_roundtrip_defers_the_rest_when_the_run_budget_runs_out(
+    state_context, monkeypatch, plain_crypt
+):
+    ctx = _ctx(state_context)
+    files = {"/a.txt": b"one", "/b.txt": b"two"}
+    batch_id = _batch(ctx, files)
+    batch.fetch(ctx, FakeRclone(files), batch_id)
+    batch.verify(ctx, batch_id)
+    proton = FakeProton(
+        {
+            "/my-files/Dropbox": [
+                proton_node("ua", "a.txt", 3, hashlib.sha1(b"one").hexdigest()),
+                proton_node("ub", "b.txt", 3, hashlib.sha1(b"two").hexdigest()),
+            ]
+        },
+        {"/my-files/Dropbox/a.txt": b"one", "/my-files/Dropbox/b.txt": b"two"},
+    )
+    batch.confirm(ctx, proton, batch_id)
+    # start_epoch 1 + 165 min - the 10 min margin: the second file starts past the line.
+    ticks = iter([1.0, 20_000.0])
+    monkeypatch.setattr(batch, "now", lambda: next(ticks))
+    counts = batch.roundtrip(ctx, proton, batch_id)
+    assert counts == {
+        "roundtrip_ok": 1,
+        "roundtrip_mismatch": 0,
+        "roundtrip_bytes": 3,
+        "deferred": 1,
+    }
+    assert proton.downloaded == ["/my-files/Dropbox/a.txt"]
+    statuses = {r["path_lower"]: r["status"] for r in batch.items(ctx, batch_id)}
+    assert statuses == {"/a.txt": "ROUNDTRIP_OK", "/b.txt": "CONFIRMED"}
+    assert batch.checkpoint(ctx, FakeStore(), batch_id) == {
+        "checkpointed": 1,
+        "failed": 0,
+    }
+    mirrored = ctx.state.connection.execute(
+        "SELECT path_lower FROM mirror_objects"
+    ).fetchall()
+    assert [r["path_lower"] for r in mirrored] == ["/a.txt"]
 
 
 def test_checkpoint_merges_only_verified_rows_and_pushes(state_context, plain_crypt):

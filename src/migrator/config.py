@@ -149,7 +149,7 @@ class Proton:
 @dataclass(frozen=True)
 class Budget:
     batch_gb: float = 4
-    batch_files: int = 5000
+    batch_files: int = 1000
     run_budget_minutes: int = 165
     ceiling_gb: float = 4000
     disk_headroom_gb: float = 1
