@@ -64,6 +64,7 @@ tasks:
           "${c}toolbox${r}" \
           "  task image                Build the toolbox image (no-op while it exists)" \
           "  task image-clean          Remove it so the next task image rebuilds" \
+          "  task clean                Delete .run, the caches and every other ignored file" \
           "  task run -- <cmd>         Run any command in the toolbox with the repo at /work" \
           "  task op -- <cmd>          Same, with secrets from 1Password via op.env" \
           ""
@@ -81,6 +82,11 @@ tasks:
     desc: Remove the toolbox image
     cmds:
       - '{{.ENGINE}} image rm {{.IMAGE}}'
+
+  clean:
+    desc: Delete every file git ignores (.run, caches, local leftovers)
+    cmds:
+      - git clean -fdX
 
   run:
     desc: 'Run any command in the toolbox image, e.g. task run -- task test'
