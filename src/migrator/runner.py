@@ -13,6 +13,7 @@ from .phases import (
     p20_delta,
     p30_plan,
     p40_batches,
+    p50_trash,
     p70_report,
     p80_empty_trash,
 )
@@ -33,6 +34,7 @@ PHASES: dict[str, PhaseDefinition] = {
     "delta": PhaseDefinition(20, "delta", "20_delta", p20_delta.run),
     "plan": PhaseDefinition(30, "plan", "30_plan", p30_plan.run),
     "batches": PhaseDefinition(40, "batches", "40_batches", p40_batches.run),
+    "trash": PhaseDefinition(50, "trash", "50_trash", p50_trash.run),
     "report": PhaseDefinition(70, "report", "70_report", p70_report.run),
     "empty-trash": PhaseDefinition(
         80, "empty-trash", "80_empty_trash", p80_empty_trash.run
