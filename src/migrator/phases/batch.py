@@ -345,7 +345,6 @@ def roundtrip(ctx: PhaseContext, proton: Any, batch_id: int) -> dict[str, int]:
     )
     counts: Counter[str] = Counter()
     rows = items(ctx, batch_id, "CONFIRMED")
-    began = now()
     for index, row in enumerate(rows, start=1):
         if index % ROUNDTRIP_PROGRESS_EVERY == 0:
             # One CLI process per file and no Proton write: without this line the run
@@ -357,7 +356,6 @@ def roundtrip(ctx: PhaseContext, proton: Any, batch_id: int) -> dict[str, int]:
                 batch=batch_id,
                 done=index - 1,
                 total=len(rows),
-                seconds=round(now() - began, 1),
             )
         if now() >= deadline:
             counts["deferred"] += 1
