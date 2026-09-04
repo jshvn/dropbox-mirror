@@ -37,6 +37,14 @@ class DropboxIdentity:
     raw: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class RetryEvent:
+    """A download retry, carrying the logger keywords the caller passes on."""
+
+    message: str
+    fields: dict[str, Any]
+
+
 class DropboxAPIProvider:
     def __init__(
         self,
@@ -153,27 +161,10 @@ class DropboxAPIProvider:
 
         raise AssertionError("unreachable Dropbox retry loop")
 
-    def _after_download_network_error(
-        self,
-        exc: requests.RequestException,
-        attempt: int,
-        settings: Dropbox,
-        delay: float,
-    ) -> float:
-        self.logger.warning(
-            "40_batches",
-            "files/download",
-            "Dropbox download request failed",
-            retry_count=attempt,
-            provider_category="NETWORK",
-            raw_error=str(exc),
-        )
-        if attempt == settings.max_attempts:
-            raise DropboxAPIError("Dropbox download exhausted network retries") from exc
-        self.sleep(delay)
-        return min(delay * 2, settings.maximum_backoff_seconds)
-
-    def download(self, path_lower: str, target: Path) -> None:
+    def download(self, path_lower: str, target: Path) -> list[RetryEvent]:
+        """Returns the retries it took, for the caller to log. Downloads run in a thread
+        pool and the logger's sink writes SQLite from the thread that opened it, so a
+        pooled download records nothing itself."""
         settings = self.cfg.dropbox
         url = settings.content_base_url.rstrip("/") + "/files/download"
         headers = {
@@ -181,32 +172,50 @@ class DropboxAPIProvider:
             "Dropbox-API-Arg": json.dumps({"path": path_lower}),
             "Content-Type": "text/plain",
         }
+        events: list[RetryEvent] = []
         delay = settings.initial_backoff_seconds
         for attempt in range(1, settings.max_attempts + 1):
             try:
                 response = self.session.post(
                     url, headers=headers, stream=True, timeout=settings.timeout_seconds
                 )
+                if response.status_code == 200:
+                    _write_download(response, target)
+                    self._throttle()
+                    return events
             except requests.RequestException as exc:
-                delay = self._after_download_network_error(
-                    exc, attempt, settings, delay
+                # The body streams inside this try, so a drop mid-file retries too; the
+                # half-written part file goes before the next attempt reopens it.
+                _part_file(target).unlink(missing_ok=True)
+                events.append(
+                    RetryEvent(
+                        "Dropbox download request failed",
+                        {
+                            "retry_count": attempt,
+                            "provider_category": "NETWORK",
+                            "raw_error": str(exc),
+                        },
+                    )
                 )
+                if attempt == settings.max_attempts:
+                    raise DropboxAPIError(
+                        "Dropbox download exhausted network retries"
+                    ) from exc
+                self.sleep(delay)
+                delay = min(delay * 2, settings.maximum_backoff_seconds)
                 continue
 
-            if response.status_code == 200:
-                _write_download(response, target)
-                self._throttle()
-                return
-
             category, wait, delay = _download_wait(response, delay, settings)
-            self.logger.warning(
-                "40_batches",
-                "files/download",
-                "Dropbox download will be retried",
-                retry_count=attempt,
-                provider_category=category,
-                raw_error=response.text[-4000:],
-                wait_seconds=wait,
+            events.append(
+                RetryEvent(
+                    "Dropbox download will be retried",
+                    {
+                        "retry_count": attempt,
+                        "provider_category": category,
+                        "raw_error": response.text[-4000:],
+                        "wait_seconds": wait,
+                    },
+                )
             )
             if attempt == settings.max_attempts:
                 raise DropboxAPIError(
@@ -466,9 +475,13 @@ class DropboxAPIProvider:
         return "/" + "/".join(actual[len(expected) :])
 
 
+def _part_file(target: Path) -> Path:
+    return target.with_name(f"{target.name}.part")
+
+
 def _write_download(response: requests.Response, target: Path) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
-    tmp = target.with_name(f"{target.name}.part")
+    tmp = _part_file(target)
     with tmp.open("wb") as handle:
         for chunk in response.iter_content(DOWNLOAD_CHUNK_SIZE):
             if chunk:

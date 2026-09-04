@@ -12,7 +12,7 @@ from typing import Any
 from .. import statefile
 from ..hashing import hash_file
 from ..logging import utc_now
-from ..providers.dropbox_api import DropboxNotFound
+from ..providers.dropbox_api import DropboxNotFound, RetryEvent
 from ..providers.proton_cli import escape_component, unwrap
 from ..store import Store
 from .base import PhaseContext, PhaseError
@@ -114,18 +114,19 @@ def fetch(ctx: PhaseContext, dropbox: Any, batch_id: int) -> dict[str, int]:
     _clear(ctx.paths.staging)
     rows = items(ctx, batch_id, "PLANNED")
 
-    def _download(row: sqlite3.Row) -> None:
+    def _download(row: sqlite3.Row) -> list[RetryEvent]:
         target = local_path(ctx.paths, str(row["path_lower"]))
         target.parent.mkdir(parents=True, exist_ok=True)
-        dropbox.download(str(row["path_lower"]), target)
+        return dropbox.download(str(row["path_lower"]), target)
 
     counts: Counter[str] = Counter()
     error: BaseException | None = None
-    with ThreadPoolExecutor(max_workers=ctx.cfg.dropbox.download_workers) as pool:
+    pool = ThreadPoolExecutor(max_workers=ctx.cfg.dropbox.download_workers)
+    try:
         futures = [(row, pool.submit(_download, row)) for row in rows]
         for row, future in futures:
             try:
-                future.result()
+                retries = future.result()
             except DropboxNotFound:
                 _set_item(
                     ctx,
@@ -139,8 +140,17 @@ def fetch(ctx: PhaseContext, dropbox: Any, batch_id: int) -> dict[str, int]:
                 if error is None:
                     error = exc
             else:
+                # The state is single-threaded, so the retries a worker collected are
+                # recorded here, on the thread that opened the connection.
+                for retry in retries:
+                    ctx.logger.warning(
+                        PHASE, "files/download", retry.message, **retry.fields
+                    )
                 _set_item(ctx, batch_id, row["path_lower"], "FETCHED")
                 counts["fetched"] += 1
+    finally:
+        # An interrupt must not wait on files nobody will use.
+        pool.shutdown(cancel_futures=True)
     if error is not None:
         raise error
     _prune_empty_dirs(ctx.paths.staging)

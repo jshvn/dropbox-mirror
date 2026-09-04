@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -10,6 +12,7 @@ from conftest import FakeDropbox, FakeProton, FakeStore
 from migrator.hashing import hash_file
 from migrator.phases import batch
 from migrator.phases.base import PhaseContext, PhaseError
+from migrator.providers.dropbox_api import DropboxAPIProvider
 
 
 def _ctx(state_context):
@@ -83,15 +86,74 @@ def test_fetch_reraises_after_the_pool_drains_on_a_download_error(state_context)
     batch_id = _batch(ctx, files)
 
     class FlakyDropbox(FakeDropbox):
-        def download(self, path_lower: str, target: Path) -> None:
+        def download(self, path_lower: str, target: Path) -> list:
             if path_lower == "/b.txt":
                 raise RuntimeError("boom")
-            super().download(path_lower, target)
+            return super().download(path_lower, target)
 
     with pytest.raises(RuntimeError, match="boom"):
         batch.fetch(ctx, FlakyDropbox(files), batch_id)
     statuses = {r["path_lower"]: r["status"] for r in batch.items(ctx, batch_id)}
     assert statuses == {"/a.txt": "FETCHED", "/b.txt": "PLANNED"}
+
+
+class _PoolResponse:
+    """Enough of requests.Response for DropboxAPIProvider.download."""
+
+    def __init__(self, status, content=b"", headers=None, text=""):
+        self.status_code = status
+        self.headers = headers or {}
+        self.text = text
+        self._content = content
+
+    def iter_content(self, chunk_size):
+        yield self._content
+
+
+class _PoolSession:
+    """Answers by the path in the Dropbox-API-Arg header, so concurrent workers each get
+    their own file; the first call for `limited` is rate limited."""
+
+    def __init__(self, contents, limited):
+        self.contents = contents
+        self.limited = limited
+        self.lock = threading.Lock()
+
+    def post(self, url, headers=None, **kwargs):
+        path = json.loads(headers["Dropbox-API-Arg"])["path"]
+        with self.lock:
+            if path == self.limited:
+                self.limited = None
+                return _PoolResponse(429, text="limited", headers={"Retry-After": "3"})
+        return _PoolResponse(200, content=self.contents[path])
+
+
+def test_fetch_records_a_pooled_download_retry_in_the_events_table(state_context):
+    ctx = _ctx(state_context)
+    ctx = replace(
+        ctx, cfg=replace(ctx.cfg, dropbox=replace(ctx.cfg.dropbox, download_workers=2))
+    )
+    files = {"/a.txt": b"hello", "/b.txt": b"world"}
+    batch_id = _batch(ctx, files)
+    session = _PoolSession(files, "/b.txt")
+    dropbox = DropboxAPIProvider(
+        ctx.cfg,
+        ctx.state,
+        ctx.logger,
+        token="test-token",
+        session=session,
+        sleep=lambda _: None,
+    )
+    counts = batch.fetch(ctx, dropbox, batch_id)
+    assert counts == {"fetched": 2, "vanished": 0}
+    assert {r["status"] for r in batch.items(ctx, batch_id)} == {"FETCHED"}
+    events = ctx.state.connection.execute(
+        "SELECT operation, provider_category, fields_json FROM events "
+        "WHERE provider_category='RATE_LIMIT'"
+    ).fetchall()
+    assert len(events) == 1
+    assert events[0]["operation"] == "files/download"
+    assert json.loads(events[0]["fields_json"])["wait_seconds"] == 3.0
 
 
 def test_verify_records_hashes_and_skips_a_mismatch(state_context):

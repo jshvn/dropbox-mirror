@@ -196,3 +196,25 @@ def test_download_retries_429_then_succeeds(state_context, tmp_path):
     provider.download("/a.txt", target)
     assert target.read_bytes() == b"payload"
     assert sleeps == [5.0]
+
+
+def test_download_retries_when_the_body_drops_mid_stream(state_context, tmp_path):
+    cfg, _paths, state, logger, _runtime = state_context
+    cfg = replace(
+        cfg, dropbox=replace(cfg.dropbox, max_attempts=3, initial_backoff_seconds=1)
+    )
+
+    class Dropping(Response):
+        def iter_content(self, chunk_size):
+            yield b"half"
+            raise requests.ConnectionError("connection reset")
+
+    session = Session([Dropping(200), Response(200, content=b"payload")])
+    provider = DropboxAPIProvider(
+        cfg, state, logger, token="test-token", session=session, sleep=lambda _: None
+    )
+    target = tmp_path / "a.txt"
+    retries = provider.download("/a.txt", target)
+    assert target.read_bytes() == b"payload"
+    assert not target.with_name("a.txt.part").exists()
+    assert [r.fields["provider_category"] for r in retries] == ["NETWORK"]

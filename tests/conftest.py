@@ -125,13 +125,14 @@ class FakeDropbox:
         self.missing = {m.lower() for m in missing}
         self.downloaded: list[str] = []
 
-    def download(self, path_lower: str, target: Path) -> None:
+    def download(self, path_lower: str, target: Path) -> list:
         self.downloaded.append(path_lower)
         key = path_lower.lower()
         if key in self.missing:
             raise DropboxNotFound(path_lower)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(self.files[key])
+        return []
 
 
 @pytest.fixture
