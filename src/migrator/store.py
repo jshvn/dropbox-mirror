@@ -64,7 +64,9 @@ class Store:
             raise StoreError(
                 f"rclone copyto from R2 failed with exit {result.returncode}"
             )
-        return True
+        # rclone exits 0 for an absent S3 object and writes nothing: the file on
+        # disk is the evidence, never the exit status.
+        return target.is_file()
 
     def put(self, source: Path, key: str) -> None:
         result = self._rclone("copyto", str(source), self._remote(key))

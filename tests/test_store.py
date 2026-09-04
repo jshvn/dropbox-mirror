@@ -32,6 +32,7 @@ def test_get_put_copy_list_argv(runtime_factory, tmp_path):
         ]
     )
     store = Store(runtime, paths, run=run)
+    (tmp_path / "x").write_bytes(b"blob")
     assert store.get(".state/x", tmp_path / "x") is True
     store.put(tmp_path / "x", ".state/y")
     store.copy(".state/history/h", ".state/state.sqlite.xz.age")
@@ -79,3 +80,12 @@ def test_bucket_required(runtime_factory, tmp_path):
     runtime = runtime_factory(tmp_path, MIRROR_R2_BUCKET="")
     with pytest.raises(StoreError, match="MIRROR_R2_BUCKET"):
         Store(runtime, WorkPaths.from_runtime(runtime))
+
+
+def test_get_is_false_when_rclone_exits_zero_without_writing(runtime_factory, tmp_path):
+    runtime = runtime_factory(tmp_path)
+    paths = WorkPaths.from_runtime(runtime)
+    paths.ensure()
+    run, _ = _fake([(0, "", "")])
+    store = Store(runtime, paths, run=run)
+    assert store.get(".state/absent", tmp_path / "absent") is False
