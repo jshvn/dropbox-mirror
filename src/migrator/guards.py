@@ -32,14 +32,12 @@ def validate_dropbox_base_url(value: str, *, expected_host: str, label: str) -> 
 
 def validate_dropbox_scope(value: str) -> str:
     if "\x00" in value or "\\" in value or ":" in value:
-        raise GuardError("dropbox.rclone.root contains an unsafe character")
+        raise GuardError("dropbox.root contains an unsafe character")
     if value.startswith("/"):
-        raise GuardError(
-            "dropbox.rclone.root must be relative to the configured namespace"
-        )
+        raise GuardError("dropbox.root must be relative to the configured namespace")
     parts = value.split("/") if value else []
     if any(part in {"", ".", ".."} for part in parts):
-        raise GuardError("dropbox.rclone.root contains an unsafe path segment")
+        raise GuardError("dropbox.root contains an unsafe path segment")
     return "/".join(parts)
 
 
