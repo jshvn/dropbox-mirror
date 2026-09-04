@@ -87,9 +87,9 @@ claimed.
 ## 🚀 First-time setup
 
 Every value that names an account is stored in exactly one place, the 1Password vault,
-and referenced in exactly two: `op.env` for the laptop and
-`.github/workflows/sync.yml` for CI, both holding only `op://<vault-uuid>/<item>/<field>`
-references. The twelve references resolve five vault items:
+and referenced in exactly one: [op.env](op.env), twelve `op://<vault>/<item>/<field>`
+lines. The laptop and CI both run `op run --env-file=op.env`, so there is no second list
+to keep in step. The twelve references resolve five vault items:
 
 | Item | Fields | Reaches a run as |
 |---|---|---|
@@ -103,10 +103,11 @@ references. The twelve references resolve five vault items:
 
 Create a vault for this repo and a service account scoped to that vault alone. Store the
 service-account token in your personal vault (never in the vault it reads) and as the one
-GitHub repository secret, `OP_SERVICE_ACCOUNT_TOKEN`. Find the vault's UUID with
-`op vault get <name> --format json` and put it in the references in `op.env` and
-`.github/workflows/sync.yml`; the vault is addressed by UUID so renaming it cannot break a
-run. The UUID is not a secret: without the service-account token it opens nothing.
+GitHub repository secret, `OP_SERVICE_ACCOUNT_TOKEN`. Put the vault into the references
+in `op.env`, by name if the name has no slash (`op://dropbox-mirror/...`), otherwise by
+UUID from `op vault get <name> --format json`: a secret reference has exactly three
+segments, so a slash in a vault name cannot be written. Neither the name nor the UUID is a
+secret: without the service-account token it opens nothing.
 
 ### 2. Dropbox
 
@@ -318,10 +319,12 @@ lockfiles go, and nothing tracked or unignored is touched.
 Proton walk) and `budget_minutes` (override the run budget). `concurrency: {group: sync,
 cancel-in-progress: false}` is what queues a chained or scheduled run behind a running
 one; overlap would kill the Proton session. `timeout-minutes: 180` against a default budget
-of 165 leaves the last batch's upload and the report room to finish. The job uses two
-third-party actions, both SHA-pinned: `actions/checkout` and the 1Password loader that
-resolves the same `op://` references as `op.env`; everything else runs inside the toolbox.
-One `always()` step publishes `.run/report.md` as the step summary and pings `/fail`
+of 165 leaves the last batch's upload and the report room to finish. The job uses one
+third-party action, SHA-pinned `actions/checkout`; it installs go-task and the 1Password
+CLI at the versions and checksums in `config/toolchain.lock.toml`, and every step that
+needs the vault runs `task op`, the same `op run --env-file=op.env` wrapper the laptop
+uses, with `OP_SERVICE_ACCOUNT_TOKEN` as the job's one secret. Everything else runs inside
+the toolbox. One `always()` step publishes `.run/report.md` as the step summary and pings `/fail`
 unless the job succeeded. When `report` left a `.run/chain` marker, a final step queues the
 next run with `gh workflow run`, which is the only reason the job has `actions: write`.
 Nothing else in this repo starts a run; the nightly dispatch comes from jshvn/dispatch.
@@ -333,7 +336,7 @@ safely. GitHub registers it when the first pull request is opened.
 On a public repository the run logs and step summaries are public too. What they carry:
 phase lines, counts, retry warnings with the provider's error class, and the report
 tables. What they never carry: a path name, a credential, or an account identifier; the
-1Password loader masks every value it exported, `MIRROR_VERBOSE` is off by default so an
+`op run` masks every value it resolved, `MIRROR_VERBOSE` is off by default so an
 error prints as its class, and the report is built from counts alone. Only collaborators
 can dispatch the workflow.
 

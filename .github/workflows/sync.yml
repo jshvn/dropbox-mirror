@@ -29,48 +29,39 @@ jobs:
     env:
       RECONCILE: ${{ inputs.reconcile }}
       RUN_BUDGET_MIN: ${{ inputs.budget_minutes }}
+      # The one repository secret. `task op` wraps every step that needs the vault in
+      # `op run --env-file=op.env`, the same command the laptop runs, so op.env is the
+      # only list of references.
+      OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Install go-task at the locked version
+      - name: Install go-task and the 1Password CLI at the locked versions
         run: |
           set -eu
-          version="$(python3 -c 'import tomllib; print(tomllib.load(open("config/toolchain.lock.toml","rb"))["task"]["version"])')"
-          sha="$(python3 -c 'import tomllib; print(tomllib.load(open("config/toolchain.lock.toml","rb"))["task"]["linux_amd64"]["sha256"])')"
-          curl -fsSL "https://github.com/go-task/task/releases/download/v${version}/task_linux_amd64.tar.gz" -o /tmp/task.tgz
-          echo "${sha}  /tmp/task.tgz" | sha256sum -c -
+          lock() { python3 -c 'import sys, tomllib; d = tomllib.load(open("config/toolchain.lock.toml", "rb")); print(eval(sys.argv[1], {"d": d}))' "$1"; }
+          task_version="$(lock 'd["task"]["version"]')"
+          task_sha="$(lock 'd["task"]["linux_amd64"]["sha256"]')"
+          curl -fsSL "https://github.com/go-task/task/releases/download/v${task_version}/task_linux_amd64.tar.gz" -o /tmp/task.tgz
+          echo "${task_sha}  /tmp/task.tgz" | sha256sum -c -
           sudo tar -xzf /tmp/task.tgz -C /usr/local/bin task
-
-      - name: Load secrets from 1Password
-        uses: 1password/load-secrets-action@70062d7a876d3eb6334754fa26efd2fbd90c32f2   # v5.0.1
-        with:
-          export-env: true
-        env:
-          OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
-          MIRROR_DROPBOX_APP_KEY: op://n2njbgnjzkufe7ft6eq2g6bvay/dropbox/app_key
-          MIRROR_DROPBOX_APP_SECRET: op://n2njbgnjzkufe7ft6eq2g6bvay/dropbox/app_secret
-          MIRROR_DROPBOX_REFRESH_TOKEN: op://n2njbgnjzkufe7ft6eq2g6bvay/dropbox/refresh_token
-          MIRROR_DROPBOX_ACCOUNT_ID: op://n2njbgnjzkufe7ft6eq2g6bvay/dropbox/account_id
-          MIRROR_PROTON_DESTINATION: op://n2njbgnjzkufe7ft6eq2g6bvay/proton/destination
-          MIRROR_PROTON_DESTINATION_UID: op://n2njbgnjzkufe7ft6eq2g6bvay/proton/destination_uid
-          AWS_ACCESS_KEY_ID: op://n2njbgnjzkufe7ft6eq2g6bvay/r2/access_key_id
-          AWS_SECRET_ACCESS_KEY: op://n2njbgnjzkufe7ft6eq2g6bvay/r2/secret_access_key
-          AWS_ENDPOINT_URL_S3: op://n2njbgnjzkufe7ft6eq2g6bvay/r2/endpoint
-          MIRROR_R2_BUCKET: op://n2njbgnjzkufe7ft6eq2g6bvay/r2/bucket
-          MIRROR_AGE_IDENTITY: op://n2njbgnjzkufe7ft6eq2g6bvay/age/identity
-          MIRROR_HEALTHCHECK_URL: op://n2njbgnjzkufe7ft6eq2g6bvay/healthcheck/url
+          op_version="$(lock 'd["op"]["version"]')"
+          op_sha="$(lock 'd["op"]["linux_amd64"]["sha256"]')"
+          curl -fsSL "https://cache.agilebits.com/dist/1P/op2/pkg/v${op_version}/op_linux_amd64_v${op_version}.zip" -o /tmp/op.zip
+          echo "${op_sha}  /tmp/op.zip" | sha256sum -c -
+          sudo unzip -q -o /tmp/op.zip op -d /usr/local/bin
 
       - name: Run the pipeline in the toolbox
-        run: task run -- task pipeline
+        run: task op -- task pipeline
 
       - name: Publish the report; ping /fail unless the job succeeded
         if: always()
         run: |
           # report.md exists whenever the report phase ran (it also finished the run row, so
           # a second pass has no RUNNING run). A run that died earlier gets its report now.
-          if [ ! -f .run/report.md ]; then task run -- task report-phase || true; fi
+          if [ ! -f .run/report.md ]; then task op -- task report-phase || true; fi
           if [ -f .run/report.md ]; then cat .run/report.md >> "$GITHUB_STEP_SUMMARY"; fi
-          if [ "${{ job.status }}" != "success" ]; then task run -- task ping-fail; fi
+          if [ "${{ job.status }}" != "success" ]; then task op -- task ping-fail; fi
 
       - name: Chain the next run
         if: success()
