@@ -8,6 +8,7 @@ from .base import PhaseContext, PhaseResult
 from .batch import history_label
 
 PHASE = "60_reconcile"
+SNAPSHOT_PURPOSE = "reconcile"
 
 
 def run(ctx: PhaseContext) -> PhaseResult:
@@ -26,12 +27,16 @@ def run(ctx: PhaseContext) -> PhaseResult:
         after_call=lambda: session.writeback(ctx.runtime, ctx.paths, store),
     )
     proton.root_uid(PHASE)
-    snapshot_id = proton.inventory(
-        f"reconcile:{ctx.run_id}", PHASE, reuse_complete=True
-    )
+    # ponytail: the walk is one CLI process per folder, so its cost is the folder count,
+    # not the file count; a few thousand folders fit a run, tens of thousands do not. A
+    # stable purpose plus reuse_complete=False resumes the RUNNING snapshot a killed run
+    # left behind instead of restarting at the root, and still refuses to reuse a
+    # COMPLETE walk from a previous reconcile. The upgrade path is a recursive listing.
+    snapshot_id = proton.inventory(SNAPSHOT_PURPOSE, PHASE, reuse_complete=False)
     connection = ctx.state.connection
     with connection:
         # One walk is evidence enough; the previous one is dead weight in every checkpoint.
+        # The walk just completed or resumed is the one kept.
         stale = [
             (int(r["id"]),)
             for r in connection.execute(

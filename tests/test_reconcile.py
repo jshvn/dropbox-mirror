@@ -26,7 +26,7 @@ def _snapshot(state, nodes):
     with state.connection:
         cursor = state.connection.execute(
             """INSERT INTO proton_snapshots(purpose, started_at, completed_at, status, destination_root, cli_version)
-               VALUES ('reconcile:1', 'now', 'now', 'COMPLETE', '/my-files/Dropbox', '0.8.0')"""
+               VALUES ('reconcile', 'now', 'now', 'COMPLETE', '/my-files/Dropbox', '0.8.0')"""
         )
         snapshot_id = int(cursor.lastrowid)
         for relative, uid, size in nodes:
@@ -88,12 +88,15 @@ def test_reconcile_drops_missing_or_missized_and_trashes_strays(
         ],
     )
     trashed = []
+    walked = []
     fake = type(
         "P",
         (),
         {
             "root_uid": lambda self, phase: "uid-destination",
-            "inventory": lambda self, purpose, phase, reuse_complete=True: snapshot_id,
+            "inventory": lambda self, purpose, phase, reuse_complete=True: (
+                walked.append((purpose, reuse_complete)) or snapshot_id
+            ),
             "trash": lambda self, paths, phase: trashed.extend(paths),
         },
     )()
@@ -101,6 +104,9 @@ def test_reconcile_drops_missing_or_missized_and_trashes_strays(
     monkeypatch.setattr(p60_reconcile, "Store", lambda runtime, paths: FakeStore())
     monkeypatch.setattr(p60_reconcile.session, "writeback", lambda *a: False)
     result = p60_reconcile.run(ctx)
+    # A stable purpose with reuse_complete=False resumes a killed walk across runs and
+    # still refuses last week's COMPLETE one.
+    assert walked == [("reconcile", False)]
     assert result.outputs["dropped"] == 2 and result.outputs["strays_trashed"] == 1
     assert result.outputs["uid_refreshed"] == 1
     assert trashed == ["/my-files/Dropbox/Stray/x.bin"]
