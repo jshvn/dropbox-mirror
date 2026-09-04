@@ -211,7 +211,7 @@ for a queued run plus a full one. Store the ping URL as field `url` of vault ite
 
 ```bash
 task image     # builds the toolbox once; every later task reuses it
-task test      # 122 tests, offline
+task test      # the pytest suite, offline
 task render    # every pipeline command rendered, no network, no credentials
 task plan      # the real thing, read-only: lists Dropbox, fetches the state, prints the plan
 ```
