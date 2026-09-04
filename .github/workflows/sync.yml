@@ -42,7 +42,7 @@ jobs:
           sudo tar -xzf /tmp/task.tgz -C /usr/local/bin task
 
       - name: Load secrets from 1Password
-        uses: 1password/load-secrets-action@REPLACE_WITH_SHA   # v2.x; pin the full commit SHA
+        uses: 1password/load-secrets-action@70062d7a876d3eb6334754fa26efd2fbd90c32f2   # v5.0.1
         with:
           export-env: true
         env:
