@@ -4,8 +4,9 @@ from pathlib import Path
 from typing import Any
 
 import boto3
+from boto3.exceptions import Boto3Error
 from botocore.config import Config
-from botocore.exceptions import ClientError
+from botocore.exceptions import BotoCoreError, ClientError
 
 from .env import Runtime
 from .paths import WorkPaths
@@ -43,7 +44,6 @@ class Store:
         return boto3.client(
             "s3",
             endpoint_url=runtime.aws_endpoint_url,
-            region_name="auto",
             aws_access_key_id=runtime.aws_access_key_id,
             aws_secret_access_key=runtime.aws_secret_access_key,
             # R2 rejects the SDK's default checksum headers.
@@ -62,12 +62,14 @@ class Store:
             if exc.response.get("Error", {}).get("Code") in MISSING_CODES:
                 return False
             raise StoreError(f"R2 download failed: {exc}") from exc
+        except (BotoCoreError, Boto3Error) as exc:
+            raise StoreError(f"R2 download failed: {exc}") from exc
         return True
 
     def put(self, source: Path, key: str) -> None:
         try:
             self.client.upload_file(str(source), self.bucket, key)
-        except ClientError as exc:
+        except (ClientError, BotoCoreError, Boto3Error) as exc:
             raise StoreError(f"R2 upload failed: {exc}") from exc
 
     def copy(self, source_key: str, target_key: str) -> None:
@@ -77,7 +79,7 @@ class Store:
                 CopySource={"Bucket": self.bucket, "Key": source_key},
                 Key=target_key,
             )
-        except ClientError as exc:
+        except (ClientError, BotoCoreError, Boto3Error) as exc:
             raise StoreError(f"R2 server-side copy failed: {exc}") from exc
 
     def list(self, prefix: str) -> list[str]:
@@ -86,7 +88,7 @@ class Store:
             paginator = self.client.get_paginator("list_objects_v2")
             for page in paginator.paginate(Bucket=self.bucket, Prefix=prefix):
                 keys.extend(entry["Key"] for entry in page.get("Contents", []))
-        except ClientError as exc:
+        except (ClientError, BotoCoreError, Boto3Error) as exc:
             raise StoreError(f"R2 listing failed: {exc}") from exc
         return sorted(keys)
 
@@ -95,5 +97,5 @@ class Store:
         credential must never read as an empty mirror."""
         try:
             self.client.list_objects_v2(Bucket=self.bucket, MaxKeys=1)
-        except ClientError as exc:
+        except (ClientError, BotoCoreError, Boto3Error) as exc:
             raise StoreError(f"R2 bucket is not reachable: {exc}") from exc

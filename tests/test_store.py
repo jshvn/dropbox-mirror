@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import pytest
-from botocore.exceptions import ClientError
+from boto3.exceptions import S3UploadFailedError
+from botocore.exceptions import ClientError, EndpointConnectionError
 
 from migrator.paths import WorkPaths
 from migrator.store import Store, StoreError
@@ -46,6 +47,16 @@ class FakeClient:
         self.calls.append(("list_objects_v2", kwargs))
         if self.probe_code:
             raise ClientError({"Error": {"Code": self.probe_code}}, "ListObjectsV2")
+
+
+class FailingClient:
+    """Raises the boto3 and botocore errors that are not ClientError."""
+
+    def upload_file(self, filename, bucket, key):
+        raise S3UploadFailedError("upload failed")
+
+    def list_objects_v2(self, **kwargs):
+        raise EndpointConnectionError(endpoint_url="https://wrong.example")
 
 
 def _store(runtime_factory, tmp_path, client, **overrides):
@@ -135,3 +146,12 @@ def test_missing_credential_is_unset_secret_error(runtime_factory, tmp_path, uns
     runtime = runtime_factory(tmp_path, **{**AWS_OVERRIDES, unset: ""})
     with pytest.raises(StoreError, match=unset):
         Store(runtime, WorkPaths.from_runtime(runtime))
+
+
+def test_boto3_and_botocore_errors_are_store_errors(runtime_factory, tmp_path):
+    store, _ = _store(runtime_factory, tmp_path, FailingClient())
+    (tmp_path / "x").write_bytes(b"blob")
+    with pytest.raises(StoreError, match="upload failed"):
+        store.put(tmp_path / "x", ".state/y")
+    with pytest.raises(StoreError, match="reachable"):
+        store.probe()
