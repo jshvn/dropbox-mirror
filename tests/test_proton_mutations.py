@@ -1,12 +1,10 @@
 from __future__ import annotations
 
-import io
 import json
 import subprocess
 
 import pytest
 
-from migrator.providers import proton_cli
 from migrator.providers.proton_cli import (
     ProtonCLIError,
     ProtonCLIProvider,
@@ -25,62 +23,12 @@ def _fake_run(responses):
     return run, calls
 
 
-class FakePopen:
-    """A CLI process for the streamed transfer path: canned output, an exit code,
-    and optionally a process that never exits until terminated."""
-
-    def __init__(self, code, out, err, *, hang=False):
-        self.stdout = io.StringIO(out)
-        self.stderr = io.StringIO(err)
-        self.returncode = None if hang else code
-        self._code = code
-        self._hang = hang
-        self.terminated = False
-        self.pid = 4242
-
-    def wait(self, timeout=None):
-        if self._hang and not self.terminated:
-            raise subprocess.TimeoutExpired(["proton-drive"], timeout or 0)
-        self.returncode = -15 if self.terminated else self._code
-        return self.returncode
-
-    def poll(self):
-        return self.returncode
-
-    def terminate(self):
-        self.terminated = True
-
-    def kill(self):
-        self.terminated = True
-
-
-def _fake_popen(responses):
-    calls = []
-
-    def popen(argv, **kwargs):
-        calls.append(argv)
-        spec = responses.pop(0)
-        return FakePopen(*spec[:3], hang=bool(spec[3]) if len(spec) > 3 else False)
-
-    return popen, calls
-
-
-def _ticking_clock(step):
-    t = [0.0]
-
-    def clock():
-        t[0] += step
-        return t[0]
-
-    return clock
-
-
 def test_upload_tree_argv_and_hook(state_context, tmp_path):
     cfg, _, state, logger, _ = state_context
-    popen, calls = _fake_popen([(0, '{"uploaded":1}\n', "")])
+    run, calls = _fake_run([(0, '{"uploaded":1}\n', "")])
     hooks = []
     provider = ProtonCLIProvider(
-        cfg, state, logger, popen=popen, after_call=lambda: hooks.append(1)
+        cfg, state, logger, run=run, after_call=lambda: hooks.append(1)
     )
     out = provider.upload_tree(
         [tmp_path / "A", tmp_path / "B"], "/my-files/Dropbox", "40_batches"
@@ -97,20 +45,20 @@ def test_upload_tree_argv_and_hook(state_context, tmp_path):
 
 def test_upload_tree_partial_failure_exit_code_is_accepted(state_context, tmp_path):
     cfg, _, state, logger, _ = state_context
-    popen, _ = _fake_popen(
+    run, _ = _fake_run(
         [(1, '{"uploaded":1,"failed":1}\n', "one item could not be uploaded")]
     )
-    provider = ProtonCLIProvider(cfg, state, logger, popen=popen)
+    provider = ProtonCLIProvider(cfg, state, logger, run=run)
     out = provider.upload_tree([tmp_path / "A"], "/my-files/Dropbox", "40_batches")
     assert out.startswith('{"uploaded"')
 
 
 def test_upload_tree_failure_raises_and_still_hooks(state_context, tmp_path):
     cfg, _, state, logger, _ = state_context
-    popen, _ = _fake_popen([(1, "", "You need to login first")])
+    run, _ = _fake_run([(1, "", "You need to login first")])
     hooks = []
     provider = ProtonCLIProvider(
-        cfg, state, logger, popen=popen, after_call=lambda: hooks.append(1)
+        cfg, state, logger, run=run, after_call=lambda: hooks.append(1)
     )
     with pytest.raises(ProtonCLIError, match="AUTH"):
         provider.upload_tree([tmp_path / "A"], "/my-files/Dropbox", "40_batches")
@@ -195,20 +143,17 @@ def test_child_cli_path_escapes_or_uses_uid():
     )
 
 
-def test_upload_timeout_keeps_the_stderr_tail_as_evidence(
-    state_context, tmp_path, monkeypatch
-):
+def test_upload_timeout_keeps_the_stderr_tail_as_evidence(state_context, tmp_path):
     cfg, _, state, logger, _ = state_context
     hooks = []
-    popen, _ = _fake_popen([(0, "", "retrying after 429\nstill waiting\n", True)])
-    monkeypatch.setattr(proton_cli, "KILL_GRACE_SECONDS", 0.0)
+
+    def run(argv, **kwargs):
+        raise subprocess.TimeoutExpired(
+            argv, kwargs["timeout"], stderr="retrying after 429\nstill waiting\n"
+        )
+
     provider = ProtonCLIProvider(
-        cfg,
-        state,
-        logger,
-        popen=popen,
-        clock=_ticking_clock(cfg.proton.transfer_timeout_seconds / 2),
-        after_call=lambda: hooks.append(1),
+        cfg, state, logger, run=run, after_call=lambda: hooks.append(1)
     )
     with pytest.raises(ProtonCLIError, match="timed out"):
         provider.upload_tree([tmp_path / "A"], "/my-files/Dropbox", "40_batches")
@@ -222,45 +167,3 @@ def test_upload_timeout_keeps_the_stderr_tail_as_evidence(
         "SELECT exit_code, response_category FROM commands ORDER BY id DESC"
     ).fetchone()
     assert (command["exit_code"], command["response_category"]) == (-1, "TIMEOUT")
-
-
-def test_upload_that_hangs_after_its_summary_is_terminated_and_accepted(
-    state_context, tmp_path, monkeypatch
-):
-    cfg, _, state, logger, _ = state_context
-    summary = '{"transferredItems":3,"transferredBytes":12,"skippedItems":0,"failedItems":0}\n'
-    popen, _ = _fake_popen([(0, summary, "", True)])
-    monkeypatch.setattr(proton_cli, "EXIT_GRACE_SECONDS", 0.0)
-    monkeypatch.setattr(proton_cli, "KILL_GRACE_SECONDS", 0.0)
-    monkeypatch.setenv("PROTON_DRIVE_CACHE_DIR", str(tmp_path))
-    (tmp_path / "proton-drive.log").write_text("debug: disposing events manager\n")
-    provider = ProtonCLIProvider(
-        cfg, state, logger, popen=popen, clock=_ticking_clock(1.0)
-    )
-    out = provider.upload_tree([tmp_path / "A"], "/my-files/Dropbox", "40_batches")
-    assert out == summary
-    row = state.connection.execute(
-        "SELECT message, safe_raw_error FROM events WHERE level='WARNING' ORDER BY id DESC"
-    ).fetchone()
-    assert "did not exit" in row["message"]
-    assert "disposing events manager" in row["safe_raw_error"]
-
-
-def test_download_that_hangs_after_its_summary_is_terminated_and_accepted(
-    state_context, tmp_path, monkeypatch
-):
-    cfg, _, state, logger, _ = state_context
-    popen, calls = _fake_popen(
-        [(0, "Transfer summary:\n  Downloaded: 1 items (12 B)\n", "", True)]
-    )
-    monkeypatch.setattr(proton_cli, "EXIT_GRACE_SECONDS", 0.0)
-    monkeypatch.setattr(proton_cli, "KILL_GRACE_SECONDS", 0.0)
-    provider = ProtonCLIProvider(
-        cfg, state, logger, popen=popen, clock=_ticking_clock(1.0), sleep=lambda _: None
-    )
-    provider.download_file("/my-files/Dropbox/a.txt", tmp_path / "dl", "40_batches")
-    assert len(calls) == 1  # accepted on the first attempt, no retry
-    command = state.connection.execute(
-        "SELECT exit_code FROM commands ORDER BY id DESC"
-    ).fetchone()
-    assert command["exit_code"] == 0
