@@ -9,6 +9,7 @@ from migrator.config import Budget, Config, Dropbox, Mirror, Proton, Rclone, Rec
 from migrator.env import Runtime
 from migrator.logging import RunLogger
 from migrator.paths import WorkPaths
+from migrator.providers.proton_cli import ProtonCLIError
 from migrator.state import State
 
 TEST_ENV = {
@@ -161,3 +162,46 @@ def seed_api_inventory(state, purpose, rows):
                 ),
             )
     return inventory_id
+
+
+class FakeProton:
+    """Stand-in for ProtonCLIProvider: canned listings, canned download bytes."""
+
+    def __init__(
+        self, listings: dict[str, list[dict]], downloads: dict[str, bytes], fail_list=()
+    ):
+        self.listings = listings
+        self.downloads = downloads
+        self.fail_list = set(fail_list)
+        self.uploads = []
+        self.downloaded = []
+
+    def root_uid(self, phase):
+        return "uid-destination"
+
+    def upload_tree(self, sources, destination, phase):
+        self.uploads.append(([str(s) for s in sources], destination))
+        return '{"ok":true}'
+
+    def list_folder(self, path, phase):
+        if path in self.fail_list:
+            raise ProtonCLIError("EXIT_1")
+        return self.listings[path]
+
+    def download_file(self, remote_path, local_parent: Path, phase):
+        self.downloaded.append(remote_path)
+        local_parent.mkdir(parents=True, exist_ok=True)
+        (local_parent / "file").write_bytes(self.downloads[remote_path])
+
+
+def proton_node(uid, name, size, sha1, kind="file"):
+    """One entry as `proton-drive filesystem list -j` returns it."""
+    return {
+        "uid": uid,
+        "name": {"ok": True, "value": name},
+        "type": kind,
+        "activeRevision": {
+            "claimedSize": size,
+            "claimedDigests": {"sha1": sha1, "sha1Verified": True},
+        },
+    }
