@@ -154,6 +154,39 @@ def test_reconcile_drops_missing_missized_and_sha1_mismatched(
     assert fields["sha1_mismatch"] == 1
 
 
+def test_reconcile_matches_a_digest_proton_reports_in_upper_case(
+    state_context, monkeypatch, plain_crypt
+):
+    ctx = _ctx(state_context)
+    inventory_id = seed_api_inventory(
+        ctx.state, "run:1", [("/Keep/ok.txt", 3, "h", 1, "file")]
+    )
+    ctx.state.update_run(ctx.run_id, inventory_id=inventory_id)
+    digest = "a94a8fe5ccb19ba61c4c0873d391e987982fbbd3"
+    _mirror(ctx.state, [("/Keep/ok.txt", 3, "u-ok", digest)])
+    snapshot_id = _snapshot(ctx.state, [("Keep/ok.txt", "u-ok", 3, digest.upper())])
+    trashed = []
+    fake = type(
+        "P",
+        (),
+        {
+            "root_uid": lambda self, phase: "uid-destination",
+            "inventory": lambda self, purpose, phase, reuse_complete=True, deadline=None: (
+                snapshot_id
+            ),
+            "trash": lambda self, paths, phase: trashed.extend(paths),
+        },
+    )()
+    monkeypatch.setattr(p60_reconcile, "ProtonCLIProvider", lambda *a, **k: fake)
+    monkeypatch.setattr(p60_reconcile, "Store", lambda runtime, paths: FakeStore())
+    monkeypatch.setattr(p60_reconcile.session, "writeback", lambda *a: False)
+    result = p60_reconcile.run(ctx)
+    assert result.outputs["matched"] == 1
+    assert result.outputs["dropped"] == 0
+    assert result.outputs["sha1_mismatch"] == 0
+    assert trashed == []
+
+
 def test_reconcile_partial_walk_pushes_state_and_touches_nothing(
     state_context, monkeypatch, plain_crypt
 ):

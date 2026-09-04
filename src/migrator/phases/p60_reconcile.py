@@ -66,7 +66,7 @@ def _correct_mirror(
             digest_mismatch = (
                 not size_mismatch
                 and node["sha1"] is not None
-                and str(node["sha1"]) != str(row["sha1"])
+                and str(node["sha1"]).casefold() != str(row["sha1"]).casefold()
             )
             if size_mismatch or digest_mismatch:
                 connection.execute(
@@ -140,6 +140,12 @@ def run(ctx: PhaseContext) -> PhaseResult:
             sha1_mismatch=0,
         )
         return PhaseResult(outputs={"partial": folders_pending})
+    # ponytail: the snapshot is compared against today's mirror_objects even when the
+    # walk began weeks ago, so a file changed or trashed since the folder was listed
+    # reads as a drop (a cheap skipped-identical re-upload) or a trash call on a node
+    # already in the trash. The ceiling is a walk spanning several reconcile intervals;
+    # the upgrade path is to restart the snapshot once it is older than one interval.
+
     # proton_nodes.relative_path (and its comparison_key) carry no leading slash while
     # Dropbox display paths do; comparison_key strips it on both sides before keying.
     nodes = {
