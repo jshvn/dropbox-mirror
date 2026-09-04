@@ -1,0 +1,18 @@
+{
+  "creationTime": {
+    "ok": true,
+    "value": "2026-01-01T00:00:00.000Z"
+  },
+  "name": {
+    "ok": true,
+    "value": "Dropbox"
+  },
+  "type": {
+    "ok": true,
+    "value": "folder"
+  },
+  "uid": {
+    "ok": true,
+    "value": "synthetic-destination-uid"
+  }
+}
