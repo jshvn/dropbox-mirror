@@ -151,6 +151,7 @@ def test_reconcile_drops_missing_missized_and_sha1_mismatched(
     assert fields["dropped"] == 3
     assert fields["uid_refreshed"] == 1
     assert fields["strays_trashed"] == 1
+    assert fields["sha1_mismatch"] == 1
 
 
 def test_reconcile_partial_walk_pushes_state_and_touches_nothing(
@@ -217,6 +218,7 @@ def test_reconcile_partial_walk_pushes_state_and_touches_nothing(
     assert fields["proton_files"] == 0
     assert fields["dropped"] == 0
     assert fields["strays_trashed"] == 0
+    assert fields["sha1_mismatch"] == 0
 
 
 def test_reconcile_skips_when_not_scheduled(state_context, monkeypatch, plain_crypt):

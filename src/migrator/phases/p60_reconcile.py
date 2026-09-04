@@ -60,6 +60,9 @@ def _correct_mirror(
                 or node["claimed_size"] is None
                 or int(node["claimed_size"]) != int(row["size"])
             )
+            # A node with no claimed digest yet (Proton hasn't computed one) has
+            # nothing to differ from, so it is left out of the comparison rather than
+            # counted as a mismatch.
             digest_mismatch = (
                 not size_mismatch
                 and node["sha1"] is not None
@@ -134,6 +137,7 @@ def run(ctx: PhaseContext) -> PhaseResult:
             dropped=0,
             uid_refreshed=0,
             strays_trashed=0,
+            sha1_mismatch=0,
         )
         return PhaseResult(outputs={"partial": folders_pending})
     # proton_nodes.relative_path (and its comparison_key) carry no leading slash while
@@ -175,6 +179,7 @@ def run(ctx: PhaseContext) -> PhaseResult:
         dropped=dropped,
         uid_refreshed=refreshed,
         strays_trashed=len(strays),
+        sha1_mismatch=sha1_mismatch,
     )
     outputs = {
         "snapshot_id": snapshot_id,
