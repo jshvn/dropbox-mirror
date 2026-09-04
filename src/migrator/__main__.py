@@ -3,11 +3,20 @@ from __future__ import annotations
 import argparse
 import sys
 
+from . import commands
 from .env import Runtime
 from .runner import PHASES, run_phase
 
-# Pre-state and utility commands register here in later tasks: {name: callable(runtime, args)}
-COMMANDS: dict[str, object] = {}
+COMMANDS = {
+    "clock": commands.clock,
+    "session": commands.session_restore,
+    "state": commands.state,
+    "ping": commands.ping,
+    "status": commands.status,
+    "state-push": commands.state_push,
+    "state-rollback": commands.state_rollback,
+    "session-seal": commands.session_seal,
+}
 
 
 def build_parser() -> argparse.ArgumentParser:
