@@ -21,7 +21,7 @@ byte-compared before the state records it. R2 holds the only record of progress.
    `rclone_token`. Put your account id in
    `config/mirror.toml` (`dbid:...`, from `users/get_current_account`).
 3. **Proton.** Turn telemetry off in account settings. On the laptop:
-   `PROTON_DRIVE_CACHE_DIR=./pd PROTON_DRIVE_CREDENTIALS_STORE=unsafe_file proton-drive auth login`,
+   `PROTON_DRIVE_CACHE_DIR=.run/pd PROTON_DRIVE_CREDENTIALS_STORE=unsafe_file proton-drive auth login`,
    sign in in the browser, create `/my-files/Dropbox`, then
    `proton-drive filesystem list -j /my-files` and copy the folder's `uid` into
    `config/mirror.toml`. Check `proton-drive filesystem upload --help` and confirm the flags
@@ -35,7 +35,8 @@ byte-compared before the state records it. R2 holds the only record of progress.
    (`https://<account>.r2.cloudflarestorage.com`), and `bucket` in vault item `r2`.
 6. **healthchecks.io.** Create a check on the nightly cron with a grace period long enough
    for a queued run plus a full one; store the ping URL as vault item `healthcheck`, field `url`.
-7. `task session-seal -- ./pd` uploads the encrypted session. `task plan` proves the whole
+7. `task session-seal -- .run/pd` uploads the encrypted session. The directory must sit
+   inside the repo, since only the repo is mounted into the toolbox; `.run/` is ignored by git. `task plan` proves the whole
    read path: it lists Dropbox, finds an empty state, and prints what the seed would move.
 8. **Seed.** Dispatch `sync` once in GitHub Actions. The first run finds no state and no
    history, treats the whole tree as the delta, and chains itself every budget until the
@@ -47,7 +48,7 @@ byte-compared before the state records it. R2 holds the only record of progress.
 ## Runbook
 
 - **A run fails with `PhaseError` and `login first` in the state events.** The Proton
-  session is gone. Repeat bootstrap step 3's login and `task session-seal -- ./pd`.
+  session is gone. Repeat bootstrap step 3's login and `task session-seal -- .run/pd`.
 - **The state looks wrong after a run.** `task state-rollback` lists
   `.state/history/<epoch>-<batch>` objects; `task state-rollback -- <key>` copies one over the
   canonical state. The next run repeats from there; re-uploads skip SHA-1-identical files.
