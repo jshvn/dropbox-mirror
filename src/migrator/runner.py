@@ -8,6 +8,7 @@ from .config import load_config
 from .env import Runtime
 from .logging import RunLogger
 from .paths import WorkPaths
+from .phases import p10_inventory
 from .phases.base import PhaseContext, PhaseError, PhaseResult
 from .state import State
 
@@ -20,8 +21,9 @@ class PhaseDefinition:
     run: Callable[[PhaseContext], PhaseResult]
 
 
-# Filled in by the phase modules' tasks; Task 10 onward adds one line each.
-PHASES: dict[str, PhaseDefinition] = {}
+PHASES: dict[str, PhaseDefinition] = {
+    "inventory": PhaseDefinition(10, "inventory", "10_inventory", p10_inventory.run),
+}
 
 
 def run_phase(command: str, *, apply: bool, runtime: Runtime) -> str:

@@ -131,3 +131,33 @@ def plain_crypt(monkeypatch):
         ),
     )
     monkeypatch.setattr(session, "_last_digest", None)
+
+
+def seed_api_inventory(state, purpose, rows):
+    """rows: (path_display, size, content_hash, is_downloadable, tag). Returns the inventory id."""
+    with state.connection:
+        cursor = state.connection.execute(
+            """INSERT INTO dropbox_inventory_runs(started_at, completed_at, status, account_id,
+               root_namespace_id, purpose) VALUES ('now','now','COMPLETE','dbid:test-account','ns',?)""",
+            (purpose,),
+        )
+        inventory_id = int(cursor.lastrowid)
+        for path, size, content_hash, downloadable, tag in rows:
+            state.connection.execute(
+                """INSERT INTO dropbox_objects(inventory_id, object_key, tag, name, path_display, path_lower,
+                   comparison_key, size, content_hash, is_downloadable, raw_json, first_page, last_page)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '{}', 1, 1)""",
+                (
+                    inventory_id,
+                    path.lower(),
+                    tag,
+                    path.rsplit("/", 1)[-1],
+                    path,
+                    path.lower(),
+                    path.lower(),
+                    size,
+                    content_hash,
+                    downloadable,
+                ),
+            )
+    return inventory_id
