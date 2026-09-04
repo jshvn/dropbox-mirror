@@ -12,6 +12,8 @@ from .store import Store
 
 SESSION_KEY = ".state/session.tar.age"
 SESSION_FILES = ("auth-session.json", "clientUid.json")
+# Process-global: each phase runs in its own process, so the first write-back in a phase
+# always pushes the session once, and later calls push only when the digest has changed.
 _last_digest: str | None = None
 
 
