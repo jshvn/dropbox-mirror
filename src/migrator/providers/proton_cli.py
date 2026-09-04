@@ -541,11 +541,17 @@ class ProtonCLIProvider:
                 self._after()
         except subprocess.TimeoutExpired as exc:
             self.state.record_command_end(command_id, -1, "TIMEOUT")
+            # The CLI prints nothing on stdout until it finishes, so its stderr tail
+            # is the only account of a stalled transfer; the state carries it to R2.
+            stderr = exc.stderr or ""
+            if isinstance(stderr, bytes):
+                stderr = stderr.decode("utf-8", "replace")
             self.logger.error(
                 phase,
                 operation,
-                "official Proton CLI mutation timed out",
+                f"official Proton CLI mutation timed out after {int(timeout)} s",
                 provider_category="TIMEOUT",
+                raw_error=stderr[-4000:],
             )
             raise ProtonCLIError(f"Proton {operation} timed out") from exc
         category = (

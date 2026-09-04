@@ -141,3 +141,29 @@ def test_child_cli_path_escapes_or_uses_uid():
         child_cli_path("/my-files/Dropbox/", "x", "u1", duplicate=True)
         == "/my-files/Dropbox/u1"
     )
+
+
+def test_upload_timeout_keeps_the_stderr_tail_as_evidence(state_context, tmp_path):
+    cfg, _, state, logger, _ = state_context
+    hooks = []
+
+    def run(argv, **kwargs):
+        raise subprocess.TimeoutExpired(
+            argv, kwargs["timeout"], stderr="retrying after 429\nstill waiting\n"
+        )
+
+    provider = ProtonCLIProvider(
+        cfg, state, logger, run=run, after_call=lambda: hooks.append(1)
+    )
+    with pytest.raises(ProtonCLIError, match="timed out"):
+        provider.upload_tree([tmp_path / "A"], "/my-files/Dropbox", "40_batches")
+    assert hooks == [1]  # the session is written back even when the CLI is killed
+    row = state.connection.execute(
+        "SELECT message, safe_raw_error FROM events WHERE level='ERROR' ORDER BY id DESC"
+    ).fetchone()
+    assert "timed out after" in row["message"]
+    assert "429" in row["safe_raw_error"]
+    command = state.connection.execute(
+        "SELECT exit_code, response_category FROM commands ORDER BY id DESC"
+    ).fetchone()
+    assert (command["exit_code"], command["response_category"]) == (-1, "TIMEOUT")

@@ -130,7 +130,7 @@ class Rclone:
     retries: int = 8
     low_level_retries: int = 20
     list_timeout_seconds: float = 300
-    transfer_timeout_seconds: float = 14400
+    transfer_timeout_seconds: float = 3600
 
 
 @dataclass(frozen=True)
@@ -143,7 +143,7 @@ class Proton:
     initial_backoff_seconds: float = 3
     maximum_backoff_seconds: float = 120
     command_timeout_seconds: float = 300
-    transfer_timeout_seconds: float = 14400
+    transfer_timeout_seconds: float = 3600
 
 
 @dataclass(frozen=True)
