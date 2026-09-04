@@ -149,6 +149,7 @@ def test_figures_and_markdown_carry_counts_never_names(
     assert "percent mirrored" in text.lower() and "66.7" in text
     assert ctx.paths.chain.exists()
     assert result.status == "PASS"
+    assert "RUNNING" not in text  # the report never lists its own unfinished row
     assert result.outputs["status"] == "SUCCESS"
     row = ctx.state.connection.execute(
         "SELECT status FROM runs WHERE id=?", (ctx.run_id,)

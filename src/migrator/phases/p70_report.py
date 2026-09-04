@@ -107,6 +107,7 @@ def figures(ctx: PhaseContext) -> dict[str, Any]:
         """SELECT phase_name, status, error_summary FROM phase_runs
            WHERE json_extract(inputs_json, '$.run_id') = ?
              AND id IN (SELECT MAX(id) FROM phase_runs GROUP BY phase_number)
+             AND status != 'RUNNING'
            ORDER BY phase_number""",
         (ctx.run_id,),
     ).fetchall()
