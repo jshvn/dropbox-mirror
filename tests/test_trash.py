@@ -21,17 +21,17 @@ def _ctx(state_context, apply=True, remaining=0):
     return PhaseContext(cfg, paths, state, logger, apply, phase_run_id, run_id, runtime)
 
 
-def _deleted(ctx, displays):
+def _deleted(ctx, displays, uid=None):
     with ctx.state.connection:
         for display in displays:
             ctx.state.connection.execute(
-                """INSERT INTO mirror_objects(path_lower, path_display, size, content_hash, sha1, sha256, run_id, mirrored_at)
-                   VALUES (?, ?, 1, 'h', 's', 's', 0, 'now')""",
-                (display.lower(), display),
+                """INSERT INTO mirror_objects(path_lower, path_display, size, content_hash, sha1, sha256,
+                   proton_uid, run_id, mirrored_at) VALUES (?, ?, 1, 'h', 's', 's', ?, 0, 'now')""",
+                (display.lower(), display, uid),
             )
             ctx.state.connection.execute(
-                "INSERT INTO delta_deleted(run_id, path_lower, path_display) VALUES (?, ?, ?)",
-                (ctx.run_id, display.lower(), display),
+                "INSERT INTO delta_deleted(run_id, path_lower, path_display, proton_uid) VALUES (?, ?, ?, ?)",
+                (ctx.run_id, display.lower(), display, uid),
             )
 
 
@@ -86,6 +86,32 @@ def test_trash_groups_by_parent_and_drops_state_rows(
     assert (
         statuses["/docs/never-there.txt"] == "NOT_FOUND"
         and statuses["/docs/a.txt"] == "TRASHED"
+    )
+
+
+def test_trash_picks_the_duplicate_matching_the_recorded_uid(
+    state_context, monkeypatch, plain_crypt
+):
+    ctx = _ctx(state_context)
+    _deleted(ctx, ["/Docs/dup.txt"], uid="u-mine")
+    proton = FakeProton(
+        {
+            "/my-files/Dropbox/Docs": [
+                proton_node("u-other", "dup.txt", 1, "s"),
+                proton_node("u-mine", "dup.txt", 1, "s"),
+            ]
+        },
+        {},
+    )
+    proton.trashed = []
+    proton.trash = lambda paths, phase: proton.trashed.extend(paths)
+    _wire(monkeypatch, proton)
+    result = p50_trash.run(ctx)
+    assert result.outputs["trashed"] == 1
+    assert proton.trashed == ["/my-files/Dropbox/Docs/u-mine"]
+    assert (
+        ctx.state.connection.execute("SELECT proton_uid FROM deletions").fetchone()[0]
+        == "u-mine"
     )
 
 

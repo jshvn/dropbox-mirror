@@ -72,13 +72,15 @@ def run(ctx: PhaseContext) -> PhaseResult:
         for row in group:
             name = PurePosixPath(str(row["path_display"])).name
             candidates = by_name.get(name, [])
+            files = [
+                n for n in candidates if str(unwrap(n.get("type"))).casefold() == "file"
+            ]
+            # The UID recorded when the file was mirrored names the exact node. Under a
+            # genuine Proton duplicate the name alone would pick either twin, and trashing
+            # the wrong one loses the mirrored copy and leaves a stray behind.
             node = next(
-                (
-                    n
-                    for n in candidates
-                    if str(unwrap(n.get("type"))).casefold() == "file"
-                ),
-                None,
+                (n for n in files if str(unwrap(n.get("uid"))) == row["proton_uid"]),
+                next(iter(files), None),
             )
             if node is None:
                 _record(ctx, row, "NOT_FOUND", None)
@@ -88,6 +90,10 @@ def run(ctx: PhaseContext) -> PhaseResult:
             targets.append(child_cli_path(parent, name, uid, len(candidates) > 1))
             found.append((row, uid))
         if targets:
+            # ponytail: the trash call returning is taken as evidence; the folder is not
+            # re-listed to prove each node is gone. The ceiling is one folder listing per
+            # trash call saved, and reconcile is the backstop: a node still present comes
+            # back as a stray on the next weekly walk.
             proton.trash(targets, PHASE)
             for row, uid in found:
                 _record(ctx, row, "TRASHED", uid)
