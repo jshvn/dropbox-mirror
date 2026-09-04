@@ -67,15 +67,12 @@ def _populate(ctx, chain=True):
                         "uploaded_files": 1,
                         "uploaded_bytes": 100,
                         "confirmed": 1,
+                        "skipped_identical": 0,
                         "confirm_failed": 0,
-                        "roundtrip_ok": 1,
-                        "roundtrip_mismatch": 0,
-                        "roundtrip_bytes": 100,
                         "checkpointed": 1,
                         "failed": 0,
                         "fetch_seconds": 10,
                         "upload_seconds": 20,
-                        "roundtrip_seconds": 5,
                         "seconds": 40,
                     }
                 ),
@@ -117,6 +114,19 @@ def test_figures_and_markdown_carry_counts_never_names(
 ):
     ctx = _ctx(state_context)
     _populate(ctx)
+    ctx.logger.info(
+        "60_reconcile",
+        "figures",
+        "reconcile figures",
+        snapshot_id=1,
+        complete=1,
+        proton_files=1,
+        matched=1,
+        dropped=0,
+        sha1_mismatch=0,
+        uid_refreshed=0,
+        strays_trashed=0,
+    )
     store = FakeStore()
     monkeypatch.setattr(p70_report, "Store", lambda runtime, paths: store)
     figures = p70_report.figures(ctx)
@@ -134,7 +144,7 @@ def test_figures_and_markdown_carry_counts_never_names(
     }
     assert (
         figures["run"]["batches_completed"] == 1
-        and figures["run"]["files_round_tripped"] == 1
+        and figures["run"]["files_confirmed"] == 1
     )
     assert figures["throttling"]["dropbox"] == {
         "rate_limited": 1,
@@ -142,7 +152,14 @@ def test_figures_and_markdown_carry_counts_never_names(
         "longest_wait_seconds": 15.0,
     }
     assert figures["throttling"]["proton"]["rate_limited"] == 1
-    assert figures["verification"]["mismatches"] == 0
+    assert figures["verification"] == {
+        "confirmed_this_run": 1,
+        "files_proven_cumulative": 1,
+        "reconcile_matched": 1,
+        "reconcile_dropped": 0,
+        "reconcile_strays_trashed": 0,
+        "mismatches": 0,
+    }
     result = p70_report.run(ctx)
     text = ctx.paths.report.read_text(encoding="utf-8")
     assert "Taxes" not in text and "a.pdf" not in text
@@ -170,6 +187,15 @@ def test_report_marks_failed_run_and_writes_no_chain(
 ):
     ctx = _ctx(state_context)
     _populate(ctx, chain=False)
+    # No 60_reconcile figures event has ever been logged: no walk has run yet.
+    assert p70_report.figures(ctx)["verification"] == {
+        "confirmed_this_run": 1,
+        "files_proven_cumulative": 1,
+        "reconcile_matched": "n/a",
+        "reconcile_dropped": "n/a",
+        "reconcile_strays_trashed": "n/a",
+        "mismatches": "n/a",
+    }
     monkeypatch.setattr(p70_report, "Store", lambda runtime, paths: FakeStore())
     pid = ctx.state.start_phase(
         40, "40_batches", apply=True, inputs={"run_id": ctx.run_id}

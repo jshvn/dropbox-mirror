@@ -24,9 +24,8 @@ def clock(runtime: Runtime, args: list[str]) -> int:
     if runtime.run_epoch is None:
         raise ValueError("MIRROR_RUN_EPOCH must be set by the Taskfile")
     paths = _paths(runtime)
-    for directory in (paths.staging, paths.roundtrip):
-        shutil.rmtree(directory, ignore_errors=True)
-        directory.mkdir()
+    shutil.rmtree(paths.staging, ignore_errors=True)
+    paths.staging.mkdir()
     for stale in (paths.report, paths.chain):
         stale.unlink(missing_ok=True)
     started = datetime.fromtimestamp(runtime.run_epoch, UTC)

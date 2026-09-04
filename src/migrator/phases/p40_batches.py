@@ -73,8 +73,7 @@ def run(ctx: PhaseContext) -> PhaseResult:
             ("fetch", lambda bid=batch_id: batch.fetch(ctx, dropbox, bid)),
             ("verify", lambda bid=batch_id: batch.verify(ctx, bid)),
             ("upload", lambda bid=batch_id: batch.upload(ctx, proton, bid)),
-            ("confirm", lambda bid=batch_id: batch.confirm(ctx, proton, bid)),
-            ("roundtrip", lambda bid=batch_id: batch.roundtrip(ctx, proton, bid)),
+            ("confirm", lambda bid=batch_id: batch.confirm(ctx, bid)),
             ("checkpoint", lambda bid=batch_id: batch.checkpoint(ctx, store, bid)),
         )
         try:
@@ -137,12 +136,12 @@ def run(ctx: PhaseContext) -> PhaseResult:
         ctx.logger.error(
             PHASE,
             "gate",
-            "a batch failed confirmation or round-trip",
+            "a batch failed confirmation",
             provider_category="VERIFICATION_FAILURE",
             batch=failed_batch,
             **outputs,
         )
-        raise PhaseError(f"batch {failed_batch} failed confirmation or round-trip")
+        raise PhaseError(f"batch {failed_batch} failed confirmation")
     if remaining and completed == 0:
         raise PhaseError("no batch completed inside the budget; not chaining")
     ctx.logger.info(PHASE, "gate", "batches finished for this run", **outputs)

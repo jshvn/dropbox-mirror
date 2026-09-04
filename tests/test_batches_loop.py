@@ -51,7 +51,7 @@ def _fake_steps(monkeypatch, seconds_per_batch, failing=()):
     monkeypatch.setattr(p40_batches, "access_token", lambda cfg, runtime: "tok")
     monkeypatch.setattr(p40_batches, "DropboxAPIProvider", lambda *a, **k: object())
     monkeypatch.setattr(p40_batches.session, "writeback", lambda *a: False)
-    for name in ("fetch", "verify", "upload", "confirm", "roundtrip"):
+    for name in ("fetch", "verify", "upload", "confirm"):
         monkeypatch.setattr(batch, name, lambda ctx, *a, _n=name: {_n: 1})
 
     def checkpoint(ctx, store, batch_id):

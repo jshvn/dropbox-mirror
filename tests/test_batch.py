@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 
 import pytest
-from conftest import FakeDropbox, FakeProton, FakeStore, proton_node
+from conftest import FakeDropbox, FakeProton, FakeStore
 
 from migrator.hashing import hash_file
 from migrator.phases import batch
@@ -24,12 +24,6 @@ def _ctx(state_context):
     )
     phase_run_id = state.start_phase(40, "40_batches", apply=True, inputs={})
     return PhaseContext(cfg, paths, state, logger, True, phase_run_id, run_id, runtime)
-
-
-@pytest.fixture(autouse=True)
-def frozen_clock(monkeypatch):
-    """batch.now is the round-trip's budget clock; pin it inside the budget by default."""
-    monkeypatch.setattr(batch, "now", lambda: 1.0)
 
 
 def _batch(ctx, files: dict[str, bytes]) -> int:
@@ -133,7 +127,7 @@ def test_upload_passes_top_level_children(state_context):
     batch_id = _batch(ctx, {"/Docs/a.txt": b"aa", "/b.txt": b"b"})
     batch.fetch(ctx, FakeDropbox({"/Docs/a.txt": b"aa", "/b.txt": b"b"}), batch_id)
     batch.verify(ctx, batch_id)
-    proton = FakeProton({}, {})
+    proton = FakeProton({})
     assert batch.upload(ctx, proton, batch_id) == {
         "uploaded_files": 2,
         "uploaded_bytes": 3,
@@ -152,9 +146,16 @@ def test_upload_stores_the_cli_report_as_an_artifact(state_context):
     batch_id = _batch(ctx, files)
     batch.fetch(ctx, FakeDropbox(files), batch_id)
     batch.verify(ctx, batch_id)
-    batch.upload(ctx, FakeProton({}, {}), batch_id)
+    batch.upload(ctx, FakeProton({}), batch_id)
     report = ctx.phase_dir("40_batches") / f"upload-{batch_id}.json"
-    assert report.read_text(encoding="utf-8") == '{"ok":true}'
+    summary = json.loads(report.read_text(encoding="utf-8"))
+    assert summary == {
+        "transferredItems": 1,
+        "transferredBytes": 2,
+        "skippedItems": 0,
+        "failedItems": 0,
+        "failures": [],
+    }
     row = ctx.state.connection.execute(
         "SELECT role, relative_path FROM artifacts WHERE phase_run_id=?",
         (ctx.phase_run_id,),
@@ -163,164 +164,129 @@ def test_upload_stores_the_cli_report_as_an_artifact(state_context):
     assert row["relative_path"].endswith(f"upload-{batch_id}.json")
 
 
-def test_confirm_matches_name_size_sha1_and_records_uid(state_context):
+def test_confirm_is_a_no_op_with_no_verified_rows(state_context):
     ctx = _ctx(state_context)
-    files = {"/Docs/a.txt": b"aa", "/Docs/bad.txt": b"bb", "/Docs/missing.txt": b"cc"}
-    batch_id = _batch(ctx, files)
-    batch.fetch(ctx, FakeDropbox(files), batch_id)
-    batch.verify(ctx, batch_id)
-    sha_a = hashlib.sha1(b"aa").hexdigest()
-    proton = FakeProton(
-        {
-            "/my-files/Dropbox/Docs": [
-                proton_node("u-a", "a.txt", 2, sha_a),
-                proton_node("u-bad", "bad.txt", 2, "0000"),
-            ]
-        },
-        {},
-    )
-    counts = batch.confirm(ctx, proton, batch_id)
-    assert counts == {"confirmed": 1, "confirm_failed": 2}
-    rows = {r["path_lower"]: r for r in batch.items(ctx, batch_id)}
-    assert rows["/docs/a.txt"]["status"] == "CONFIRMED"
-    assert rows["/docs/a.txt"]["proton_uid"] == "u-a"
-    assert rows["/docs/a.txt"]["cli_path"] == "/my-files/Dropbox/Docs/a.txt"
-    assert rows["/docs/bad.txt"]["status"] == "CONFIRM_FAILED"
-    assert json.loads(rows["/docs/bad.txt"]["details_json"])["reason"] == "sha1"
-    assert json.loads(rows["/docs/missing.txt"]["details_json"])["reason"] == "absent"
-
-
-def test_confirm_uses_uid_path_for_duplicate_names_and_listing_failure(state_context):
-    ctx = _ctx(state_context)
-    files = {"/D/x.txt": b"x", "/E/y.txt": b"y"}
-    batch_id = _batch(ctx, files)
-    batch.fetch(ctx, FakeDropbox(files), batch_id)
-    batch.verify(ctx, batch_id)
-    sha_x = hashlib.sha1(b"x").hexdigest()
-    proton = FakeProton(
-        {
-            "/my-files/Dropbox/D": [
-                proton_node("u1", "x.txt", 1, sha_x),
-                proton_node("u2", "x.txt", 9, "zz"),
-            ]
-        },
-        {},
-        fail_list=["/my-files/Dropbox/E"],
-    )
-    counts = batch.confirm(ctx, proton, batch_id)
-    rows = {r["path_lower"]: r for r in batch.items(ctx, batch_id)}
-    assert (
-        rows["/d/x.txt"]["status"] == "CONFIRMED"
-        and rows["/d/x.txt"]["cli_path"] == "/my-files/Dropbox/D/u1"
-    )
-    assert rows["/e/y.txt"]["status"] == "CONFIRM_FAILED"
-    assert counts == {"confirmed": 1, "confirm_failed": 1}
-
-
-def test_roundtrip_compares_bytes(state_context, monkeypatch):
-    monkeypatch.setattr(batch, "ROUNDTRIP_PROGRESS_EVERY", 2)
-    ctx = _ctx(state_context)
-    files = {"/a.txt": b"same", "/b.txt": b"orig"}
-    batch_id = _batch(ctx, files)
-    batch.fetch(ctx, FakeDropbox(files), batch_id)
-    batch.verify(ctx, batch_id)
-    proton = FakeProton(
-        {
-            "/my-files/Dropbox": [
-                proton_node("ua", "a.txt", 4, hashlib.sha1(b"same").hexdigest()),
-                proton_node("ub", "b.txt", 4, hashlib.sha1(b"orig").hexdigest()),
-            ]
-        },
-        {"/my-files/Dropbox/a.txt": b"same", "/my-files/Dropbox/b.txt": b"diff"},
-    )
-    batch.confirm(ctx, proton, batch_id)
-    counts = batch.roundtrip(ctx, proton, batch_id)
-    assert counts == {
-        "roundtrip_ok": 1,
-        "roundtrip_mismatch": 1,
-        "roundtrip_bytes": 8,
-        "deferred": 0,
+    batch_id = _batch(ctx, {"/a.txt": b"aa"})
+    assert batch.confirm(ctx, batch_id) == {
+        "confirmed": 0,
+        "skipped_identical": 0,
+        "confirm_failed": 0,
     }
-    rows = {r["path_lower"]: r["status"] for r in batch.items(ctx, batch_id)}
-    assert rows == {"/a.txt": "ROUNDTRIP_OK", "/b.txt": "ROUNDTRIP_MISMATCH"}
-    assert not any(ctx.paths.roundtrip.iterdir())
-    progress = ctx.state.connection.execute(
-        "SELECT message FROM events WHERE operation='roundtrip' AND message LIKE 'round-trip progress%'"
-    ).fetchall()
-    assert [r["message"] for r in progress] == ["round-trip progress: 1 of 2 files"]
 
 
-def test_roundtrip_defers_the_rest_when_the_run_budget_runs_out(
-    state_context, monkeypatch, plain_crypt
-):
+def test_confirm_raises_when_the_upload_summary_is_missing(state_context):
     ctx = _ctx(state_context)
-    files = {"/a.txt": b"one", "/b.txt": b"two"}
+    files = {"/a.txt": b"aa"}
     batch_id = _batch(ctx, files)
     batch.fetch(ctx, FakeDropbox(files), batch_id)
     batch.verify(ctx, batch_id)
-    proton = FakeProton(
-        {
-            "/my-files/Dropbox": [
-                proton_node("ua", "a.txt", 3, hashlib.sha1(b"one").hexdigest()),
-                proton_node("ub", "b.txt", 3, hashlib.sha1(b"two").hexdigest()),
-            ]
-        },
-        {"/my-files/Dropbox/a.txt": b"one", "/my-files/Dropbox/b.txt": b"two"},
-    )
-    batch.confirm(ctx, proton, batch_id)
-    # start_epoch 1 + 165 min - the 10 min margin: the second file starts past the line.
-    ticks = iter([1.0, 20_000.0])
-    monkeypatch.setattr(batch, "now", lambda: next(ticks))
-    counts = batch.roundtrip(ctx, proton, batch_id)
-    assert counts == {
-        "roundtrip_ok": 1,
-        "roundtrip_mismatch": 0,
-        "roundtrip_bytes": 3,
-        "deferred": 1,
-    }
-    assert proton.downloaded == ["/my-files/Dropbox/a.txt"]
+    with pytest.raises(PhaseError, match="upload summary missing"):
+        batch.confirm(ctx, batch_id)
+
+
+def test_confirm_matches_the_verified_count_with_a_merged_folder(state_context):
+    ctx = _ctx(state_context)
+    files = {"/Docs/a.txt": b"aa", "/Docs/b.txt": b"bb", "/c.txt": b"c"}
+    batch_id = _batch(ctx, files)
+    batch.fetch(ctx, FakeDropbox(files), batch_id)
+    batch.verify(ctx, batch_id)
+    batch.upload(ctx, FakeProton({}), batch_id)
+    counts = batch.confirm(ctx, batch_id)
+    assert counts == {"confirmed": 3, "skipped_identical": 0, "confirm_failed": 0}
     statuses = {r["path_lower"]: r["status"] for r in batch.items(ctx, batch_id)}
-    assert statuses == {"/a.txt": "ROUNDTRIP_OK", "/b.txt": "CONFIRMED"}
-    assert batch.checkpoint(ctx, FakeStore(), batch_id) == {
-        "checkpointed": 1,
-        "failed": 0,
+    assert statuses == {
+        "/docs/a.txt": "CONFIRMED",
+        "/docs/b.txt": "CONFIRMED",
+        "/c.txt": "CONFIRMED",
     }
-    mirrored = ctx.state.connection.execute(
-        "SELECT path_lower FROM mirror_objects"
-    ).fetchall()
-    assert [r["path_lower"] for r in mirrored] == ["/a.txt"]
 
 
-def test_checkpoint_merges_only_verified_rows_and_pushes(state_context, plain_crypt):
+def test_confirm_fails_the_batch_when_the_summary_reports_a_failure(state_context):
     ctx = _ctx(state_context)
-    files = {"/a.txt": b"same", "/b.txt": b"orig"}
+    files = {"/a.txt": b"aa", "/b.txt": b"bb"}
     batch_id = _batch(ctx, files)
     batch.fetch(ctx, FakeDropbox(files), batch_id)
     batch.verify(ctx, batch_id)
-    proton = FakeProton(
-        {
-            "/my-files/Dropbox": [
-                proton_node("ua", "a.txt", 4, hashlib.sha1(b"same").hexdigest()),
-                proton_node("ub", "b.txt", 4, hashlib.sha1(b"orig").hexdigest()),
-            ]
-        },
-        {"/my-files/Dropbox/a.txt": b"same", "/my-files/Dropbox/b.txt": b"diff"},
+    proton = FakeProton({})
+    proton.fail = {"a.txt"}
+    batch.upload(ctx, proton, batch_id)
+    counts = batch.confirm(ctx, batch_id)
+    assert counts == {"confirmed": 0, "skipped_identical": 0, "confirm_failed": 2}
+    statuses = {r["path_lower"]: r["status"] for r in batch.items(ctx, batch_id)}
+    assert statuses == {"/a.txt": "CONFIRM_FAILED", "/b.txt": "CONFIRM_FAILED"}
+    reason = json.loads(
+        ctx.state.connection.execute(
+            "SELECT details_json FROM batch_items WHERE batch_id=? AND path_lower='/a.txt'",
+            (batch_id,),
+        ).fetchone()[0]
     )
-    batch.confirm(ctx, proton, batch_id)
-    batch.roundtrip(ctx, proton, batch_id)
+    assert reason["reason"] == "upload summary mismatch" and reason["failed"] == 1
+
+
+def test_confirm_counts_content_identical_skips(state_context):
+    ctx = _ctx(state_context)
+    files = {"/a.txt": b"aa", "/b.txt": b"bb"}
+    batch_id = _batch(ctx, files)
+    batch.fetch(ctx, FakeDropbox(files), batch_id)
+    batch.verify(ctx, batch_id)
+    proton = FakeProton({})
+    proton.skip = {"a.txt"}
+    batch.upload(ctx, proton, batch_id)
+    counts = batch.confirm(ctx, batch_id)
+    assert counts == {"confirmed": 2, "skipped_identical": 1, "confirm_failed": 0}
+
+
+def test_checkpoint_merges_confirmed_rows_and_pushes(state_context, plain_crypt):
+    ctx = _ctx(state_context)
+    files = {"/a.txt": b"same"}
+    batch_id = _batch(ctx, files)
+    batch.fetch(ctx, FakeDropbox(files), batch_id)
+    batch.verify(ctx, batch_id)
+    batch.upload(ctx, FakeProton({}), batch_id)
+    batch.confirm(ctx, batch_id)
     store = FakeStore()
     counts = batch.checkpoint(ctx, store, batch_id)
-    assert counts == {"checkpointed": 1, "failed": 1}
+    assert counts == {"checkpointed": 1, "failed": 0}
     mirrored = ctx.state.connection.execute(
         "SELECT path_lower, proton_uid, run_id FROM mirror_objects"
     ).fetchall()
-    assert [tuple(r) for r in mirrored] == [("/a.txt", "ua", ctx.run_id)]
+    assert [tuple(r) for r in mirrored] == [("/a.txt", None, ctx.run_id)]
     assert (
         ctx.state.connection.execute("SELECT status FROM batches").fetchone()[0]
-        == "FAILED"
+        == "CHECKPOINTED"
     )
     assert sorted(store.objects) == [
         ".state/history/1-1.sqlite.xz.age",
         ".state/state.sqlite.xz.age",
     ]
+    assert not any(ctx.paths.staging.iterdir())
+
+
+def test_checkpoint_fails_the_batch_when_a_row_confirm_failed(
+    state_context, plain_crypt
+):
+    ctx = _ctx(state_context)
+    files = {"/a.txt": b"same", "/b.txt": b"orig"}
+    batch_id = _batch(ctx, files)
+    batch.fetch(ctx, FakeDropbox(files), batch_id)
+    batch.verify(ctx, batch_id)
+    with ctx.state.connection:
+        ctx.state.connection.execute(
+            "UPDATE batch_items SET status='CONFIRMED' WHERE batch_id=? AND path_lower='/a.txt'",
+            (batch_id,),
+        )
+        ctx.state.connection.execute(
+            "UPDATE batch_items SET status='CONFIRM_FAILED' WHERE batch_id=? AND path_lower='/b.txt'",
+            (batch_id,),
+        )
+    counts = batch.checkpoint(ctx, FakeStore(), batch_id)
+    assert counts == {"checkpointed": 1, "failed": 1}
+    mirrored = ctx.state.connection.execute(
+        "SELECT path_lower FROM mirror_objects"
+    ).fetchall()
+    assert [r["path_lower"] for r in mirrored] == ["/a.txt"]
+    assert (
+        ctx.state.connection.execute("SELECT status FROM batches").fetchone()[0]
+        == "FAILED"
+    )
     assert not any(ctx.paths.staging.iterdir())

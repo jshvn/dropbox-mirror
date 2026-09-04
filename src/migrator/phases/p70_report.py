@@ -13,7 +13,6 @@ PHASE = "70_report"
 ERROR_CLASSES = {
     "content-hash mismatch": "content hash mismatch",
     "upload failure": "upload failed",
-    "round-trip mismatch": "ROUNDTRIP_MISMATCH",
     "confirm failure": "CONFIRM_FAILED",
     "listing refused": "floor",
     "session trouble": "login",
@@ -32,6 +31,22 @@ def _batch_details(ctx: PhaseContext) -> list[dict[str, Any]]:
             (ctx.run_id,),
         )
     ]
+
+
+def _reconcile_figures(ctx: PhaseContext) -> dict[str, Any]:
+    """The latest weekly walk's own figures event, by the shared contract
+    (migrator.phases.p60_reconcile). Absent means no walk has run yet."""
+    row = ctx.state.connection.execute(
+        "SELECT fields_json FROM events WHERE phase='60_reconcile' AND operation='figures' "
+        "ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    fields = json.loads(row["fields_json"]) if row else {}
+    return {
+        "reconcile_matched": fields.get("matched", "n/a"),
+        "reconcile_dropped": fields.get("dropped", "n/a"),
+        "reconcile_strays_trashed": fields.get("strays_trashed", "n/a"),
+        "mismatches": fields.get("sha1_mismatch", "n/a"),
+    }
 
 
 def _throttling(
@@ -102,7 +117,6 @@ def figures(ctx: PhaseContext) -> dict[str, Any]:
     durations.sort()
     fetch_s = sum(float(d.get("fetch_seconds", 0) or 0) for d in details)
     upload_s = sum(float(d.get("upload_seconds", 0) or 0) for d in details)
-    roundtrip_s = sum(float(d.get("roundtrip_seconds", 0) or 0) for d in details)
     gb = 1024**3
 
     def rate(nbytes: int, seconds: float) -> float:
@@ -140,6 +154,7 @@ def figures(ctx: PhaseContext) -> dict[str, Any]:
     cumulative_verified = int(
         connection.execute("SELECT COUNT(*) FROM mirror_objects").fetchone()[0]
     )
+    reconcile_fields = _reconcile_figures(ctx)
     return {
         "mirror": {
             "inventory_files": inventory_files,
@@ -167,9 +182,8 @@ def figures(ctx: PhaseContext) -> dict[str, Any]:
             "files_hash_mismatched": _sum(details, "hash_mismatch"),
             "files_uploaded": _sum(details, "uploaded_files"),
             "bytes_uploaded": moved_bytes,
+            "files_skipped_identical": _sum(details, "skipped_identical"),
             "files_confirmed": _sum(details, "confirmed"),
-            "files_round_tripped": _sum(details, "roundtrip_ok")
-            + _sum(details, "roundtrip_mismatch"),
             "files_checkpointed": moved,
             "files_trashed": next(
                 (int(r["n"]) for r in deletions if r["status"] == "TRASHED"), 0
@@ -181,9 +195,6 @@ def figures(ctx: PhaseContext) -> dict[str, Any]:
         "throughput": {
             "dropbox_down_gb_per_hour": rate(_sum(details, "bytes"), fetch_s),
             "proton_up_gb_per_hour": rate(moved_bytes, upload_s),
-            "proton_down_gb_per_hour": rate(
-                _sum(details, "roundtrip_bytes"), roundtrip_s
-            ),
             "batch_seconds_min": durations[0] if durations else 0,
             "batch_seconds_median": durations[len(durations) // 2] if durations else 0,
             "batch_seconds_max": durations[-1] if durations else 0,
@@ -194,10 +205,9 @@ def figures(ctx: PhaseContext) -> dict[str, Any]:
         },
         "errors": errors,
         "verification": {
-            "round_trip_ok_this_run": _sum(details, "roundtrip_ok"),
-            "confirm_failed": _sum(details, "confirm_failed"),
-            "mismatches": _sum(details, "roundtrip_mismatch"),
+            "confirmed_this_run": _sum(details, "confirmed"),
             "files_proven_cumulative": cumulative_verified,
+            **reconcile_fields,
         },
         "phases": {row["phase_name"]: row["status"] for row in phases},
         "failed_phases": failed_phases,

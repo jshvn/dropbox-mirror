@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -183,33 +185,56 @@ def seed_api_inventory(state, purpose, rows):
 
 
 class FakeProton:
-    """Stand-in for ProtonCLIProvider: canned listings, canned download bytes."""
+    """Stand-in for ProtonCLIProvider: canned listings, an `upload_tree` that reports on
+    what it was actually handed. `skip` and `fail` are file names the CLI would report as
+    content-identical or refused; set them on the instance before calling `upload_tree`."""
 
-    def __init__(
-        self, listings: dict[str, list[dict]], downloads: dict[str, bytes], fail_list=()
-    ):
+    def __init__(self, listings: dict[str, list[dict]], fail_list=()):
         self.listings = listings
-        self.downloads = downloads
         self.fail_list = set(fail_list)
+        self.skip: set[str] = set()
+        self.fail: set[str] = set()
         self.uploads = []
-        self.downloaded = []
 
     def root_uid(self, phase):
         return "uid-destination"
 
     def upload_tree(self, sources, destination, phase):
         self.uploads.append(([str(s) for s in sources], destination))
-        return '{"ok":true}'
+        counts = Counter()
+        failures = []
+
+        def walk(path: Path) -> None:
+            if path.is_dir():
+                counts["transferredItems"] += 1
+                for child in sorted(path.iterdir()):
+                    walk(child)
+                return
+            if path.name in self.fail:
+                counts["failedItems"] += 1
+                failures.append({"name": path.name, "reason": "failed"})
+            elif path.name in self.skip:
+                counts["skippedItems"] += 1
+            else:
+                counts["transferredItems"] += 1
+                counts["transferredBytes"] += path.stat().st_size
+
+        for source in sources:
+            walk(source)
+        return json.dumps(
+            {
+                "transferredItems": counts["transferredItems"],
+                "transferredBytes": counts["transferredBytes"],
+                "skippedItems": counts["skippedItems"],
+                "failedItems": counts["failedItems"],
+                "failures": failures,
+            }
+        )
 
     def list_folder(self, path, phase):
         if path in self.fail_list:
             raise ProtonCLIError("EXIT_1")
         return self.listings[path]
-
-    def download_file(self, remote_path, local_parent: Path, phase):
-        self.downloaded.append(remote_path)
-        local_parent.mkdir(parents=True, exist_ok=True)
-        (local_parent / "file").write_bytes(self.downloads[remote_path])
 
 
 def proton_node(uid, name, size, sha1, kind="file"):

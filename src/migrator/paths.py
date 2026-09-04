@@ -31,10 +31,6 @@ class WorkPaths:
         return self.root / "staging"
 
     @property
-    def roundtrip(self) -> Path:
-        return self.root / "roundtrip"
-
-    @property
     def logs(self) -> Path:
         return self.root / "logs"
 
@@ -55,7 +51,6 @@ class WorkPaths:
             self.root,
             self.session,
             self.staging,
-            self.roundtrip,
             self.logs,
             self.logs / "phases",
         ):

@@ -55,8 +55,7 @@ def test_trash_groups_by_parent_and_drops_state_rows(
                 proton_node("ub", "b.txt", 1, "s"),
             ],
             "/my-files/Dropbox/Other": [proton_node("uc", "c.txt", 1, "s")],
-        },
-        {},
+        }
     )
     proton.trashed = []
     proton.trash = lambda paths, phase: proton.trashed.append(sorted(paths))
@@ -100,8 +99,7 @@ def test_trash_picks_the_duplicate_matching_the_recorded_uid(
                 proton_node("u-other", "dup.txt", 1, "s"),
                 proton_node("u-mine", "dup.txt", 1, "s"),
             ]
-        },
-        {},
+        }
     )
     proton.trashed = []
     proton.trash = lambda paths, phase: proton.trashed.extend(paths)
@@ -120,7 +118,7 @@ def test_trash_keeps_state_rows_when_a_parent_listing_fails(
 ):
     ctx = _ctx(state_context)
     _deleted(ctx, ["/Docs/a.txt"])
-    proton = FakeProton({}, {}, fail_list=["/my-files/Dropbox/Docs"])
+    proton = FakeProton({}, fail_list=["/my-files/Dropbox/Docs"])
     proton.trash = lambda paths, phase: (_ for _ in ()).throw(
         AssertionError("nothing to trash")
     )
@@ -148,7 +146,7 @@ def test_trash_keeps_state_rows_when_a_parent_listing_fails(
 def test_trash_skips_while_batches_remain(state_context, monkeypatch, plain_crypt):
     ctx = _ctx(state_context, remaining=2)
     _deleted(ctx, ["/Docs/a.txt"])
-    _wire(monkeypatch, FakeProton({}, {}))
+    _wire(monkeypatch, FakeProton({}))
     result = p50_trash.run(ctx)
     assert result.outputs == {"skipped": "batches remain", "planned": 1}
     assert (
