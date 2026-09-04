@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.7
 # Toolbox for dropbox-mirror. The repo is bind-mounted at /work; this image holds
 # the toolchain only, pinned by config/toolchain.lock.toml.
-FROM python:3.13.7-slim-bookworm@sha256:adafcc17694d715c905b4c7bebd96907a1fd5cf183395f0ebc4d3428bd22d92d AS fetch
+FROM python:3.13.15-slim-bookworm@sha256:ed86c82274b3c69b52fb5820f358f0bd7df0b603332063cb5c6e32bd220c3e6e AS fetch
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl \
@@ -28,7 +28,7 @@ RUN set -eu; \
     tar -xzf /tmp/task.tgz -C /tmp task; \
     install -m 0755 /tmp/task /usr/local/bin/task
 
-FROM python:3.13.7-slim-bookworm@sha256:adafcc17694d715c905b4c7bebd96907a1fd5cf183395f0ebc4d3428bd22d92d AS toolbox
+FROM python:3.13.15-slim-bookworm@sha256:ed86c82274b3c69b52fb5820f358f0bd7df0b603332063cb5c6e32bd220c3e6e AS toolbox
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
