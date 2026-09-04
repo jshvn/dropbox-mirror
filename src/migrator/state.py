@@ -274,8 +274,6 @@ CREATE TABLE IF NOT EXISTS batch_items (
     status TEXT NOT NULL,
     sha1 TEXT,
     sha256 TEXT,
-    proton_uid TEXT,
-    cli_path TEXT,
     details_json TEXT NOT NULL DEFAULT '{}',
     PRIMARY KEY(batch_id, path_lower)
 );

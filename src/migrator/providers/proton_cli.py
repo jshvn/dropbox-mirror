@@ -580,8 +580,9 @@ class ProtonCLIProvider:
             )
         if result.returncode != 0:
             # An accepted non-zero exit means the CLI handled some items and refused
-            # others; confirm adjudicates each file, and this is the only account of why
-            # a particular one was refused.
+            # others; confirm reads the upload summary's counts as one batch-wide
+            # verdict, and this log line is the only account of why the exit was
+            # non-zero.
             self.logger.warning(
                 phase,
                 operation,

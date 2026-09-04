@@ -289,12 +289,12 @@ def checkpoint(ctx: PhaseContext, store: Store, batch_id: int) -> dict[str, int]
         connection.executemany(
             """
             INSERT INTO mirror_objects(path_lower, path_display, size, content_hash, sha1, sha256,
-                                       proton_uid, run_id, mirrored_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                       run_id, mirrored_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(path_lower) DO UPDATE SET
                 path_display=excluded.path_display, size=excluded.size,
                 content_hash=excluded.content_hash, sha1=excluded.sha1, sha256=excluded.sha256,
-                proton_uid=excluded.proton_uid, run_id=excluded.run_id, mirrored_at=excluded.mirrored_at
+                run_id=excluded.run_id, mirrored_at=excluded.mirrored_at
             """,
             [
                 (
@@ -304,7 +304,6 @@ def checkpoint(ctx: PhaseContext, store: Store, batch_id: int) -> dict[str, int]
                     r["content_hash"],
                     r["sha1"],
                     r["sha256"],
-                    r["proton_uid"],
                     ctx.run_id,
                     now,
                 )
