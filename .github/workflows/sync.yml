@@ -1,0 +1,83 @@
+name: sync
+
+on:
+  workflow_dispatch:
+    inputs:
+      reconcile:
+        description: Force a full Proton walk this run
+        type: boolean
+        default: false
+      budget_minutes:
+        description: Wall-clock budget for batches (default from config/mirror.toml)
+        type: string
+        default: ""
+
+# Overlap kills the Proton session; the group also queues a chained or scheduled
+# run behind the one in progress.
+concurrency:
+  group: sync
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: write   # chain: gh workflow run
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      RECONCILE: ${{ inputs.reconcile }}
+      RUN_BUDGET_MIN: ${{ inputs.budget_minutes }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262   # v4.4.0
+
+      - name: Install go-task at the locked version
+        run: |
+          set -eu
+          version="$(python3 -c 'import tomllib; print(tomllib.load(open("config/toolchain.lock.toml","rb"))["task"]["version"])')"
+          sha="$(python3 -c 'import tomllib; print(tomllib.load(open("config/toolchain.lock.toml","rb"))["task"]["linux_amd64"]["sha256"])')"
+          curl -fsSL "https://github.com/go-task/task/releases/download/v${version}/task_linux_amd64.tar.gz" -o /tmp/task.tgz
+          echo "${sha}  /tmp/task.tgz" | sha256sum -c -
+          sudo tar -xzf /tmp/task.tgz -C /usr/local/bin task
+
+      - name: Load secrets from 1Password
+        uses: 1password/load-secrets-action@REPLACE_WITH_SHA   # v2.x; pin the full commit SHA
+        with:
+          export-env: true
+        env:
+          OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+          MIRROR_DROPBOX_APP_KEY: op://VAULT-UUID/dropbox/app_key
+          MIRROR_DROPBOX_APP_SECRET: op://VAULT-UUID/dropbox/app_secret
+          MIRROR_DROPBOX_REFRESH_TOKEN: op://VAULT-UUID/dropbox/refresh_token
+          RCLONE_CONFIG_DROPBOX_CLIENT_ID: op://VAULT-UUID/dropbox/app_key
+          RCLONE_CONFIG_DROPBOX_CLIENT_SECRET: op://VAULT-UUID/dropbox/app_secret
+          RCLONE_CONFIG_DROPBOX_TOKEN: op://VAULT-UUID/dropbox/rclone_token
+          RCLONE_CONFIG_R2_ACCESS_KEY_ID: op://VAULT-UUID/r2/access_key_id
+          RCLONE_CONFIG_R2_SECRET_ACCESS_KEY: op://VAULT-UUID/r2/secret_access_key
+          RCLONE_CONFIG_R2_ENDPOINT: op://VAULT-UUID/r2/endpoint
+          MIRROR_R2_BUCKET: op://VAULT-UUID/r2/bucket
+          MIRROR_AGE_IDENTITY: op://VAULT-UUID/age/identity
+          MIRROR_HEALTHCHECK_URL: op://VAULT-UUID/healthcheck/url
+
+      - name: Run the pipeline in the toolbox
+        run: task run -- task pipeline
+
+      - name: Publish the report; ping /fail unless the job succeeded
+        if: always()
+        run: |
+          # report.md exists whenever the report phase ran (it also finished the run row, so
+          # a second pass has no RUNNING run). A run that died earlier gets its report now.
+          if [ ! -f .run/report.md ]; then task run -- task report-phase || true; fi
+          if [ -f .run/report.md ]; then cat .run/report.md >> "$GITHUB_STEP_SUMMARY"; fi
+          if [ "${{ job.status }}" != "success" ]; then task run -- task ping-fail; fi
+
+      - name: Chain the next run
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -f .run/chain ]; then
+            gh workflow run sync.yml --ref "$GITHUB_REF_NAME"
+            echo "chained: next run queued" >> "$GITHUB_STEP_SUMMARY"
+          fi

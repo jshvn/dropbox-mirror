@@ -1,0 +1,25 @@
+name: check
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262   # v4.4.0
+      - name: Install go-task at the locked version
+        run: |
+          set -eu
+          version="$(python3 -c 'import tomllib; print(tomllib.load(open("config/toolchain.lock.toml","rb"))["task"]["version"])')"
+          sha="$(python3 -c 'import tomllib; print(tomllib.load(open("config/toolchain.lock.toml","rb"))["task"]["linux_amd64"]["sha256"])')"
+          curl -fsSL "https://github.com/go-task/task/releases/download/v${version}/task_linux_amd64.tar.gz" -o /tmp/task.tgz
+          echo "${sha}  /tmp/task.tgz" | sha256sum -c -
+          sudo tar -xzf /tmp/task.tgz -C /usr/local/bin task
+      - run: task test
+      - run: task lint
+      - run: task render
