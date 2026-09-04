@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import os
 import re
 import tomllib
+from collections.abc import Mapping
 from dataclasses import dataclass, fields
 from math import isfinite
 from pathlib import Path
@@ -108,7 +110,7 @@ class Mirror:
 
 @dataclass(frozen=True)
 class Dropbox:
-    expected_account_id: str
+    expected_account_id: str = ""
     root: str = ""
     api_base_url: str = "https://api.dropboxapi.com/2"
     content_base_url: str = "https://content.dropboxapi.com/2"
@@ -124,7 +126,7 @@ class Dropbox:
 
 @dataclass(frozen=True)
 class Proton:
-    expected_destination_uid: str
+    expected_destination_uid: str = ""
     executable: str = "proton-drive"
     destination: str = "/my-files/Dropbox"
     list_max_attempts: int = 8
@@ -174,11 +176,19 @@ class Config:
 
 _MIRROR_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 SECTIONS = {"mirror", "dropbox", "proton", "budget", "reconcile"}
+# Account-specific values live in the vault (op.env) and override the file, so
+# the committed configuration names no account.
+ENV_OVERRIDES = {
+    "MIRROR_DROPBOX_ACCOUNT_ID": ("dropbox", "expected_account_id"),
+    "MIRROR_PROTON_DESTINATION": ("proton", "destination"),
+    "MIRROR_PROTON_DESTINATION_UID": ("proton", "expected_destination_uid"),
+}
 
 
-def load_config(path: str | Path) -> Config:
+def load_config(path: str | Path, environ: Mapping[str, str] | None = None) -> Config:
     from .hashing import sha256_file
 
+    env = os.environ if environ is None else environ
     source = Path(path).expanduser().resolve()
     try:
         data = tomllib.loads(source.read_bytes().decode("utf-8"))
@@ -187,6 +197,9 @@ def load_config(path: str | Path) -> Config:
     unknown = sorted(set(data) - SECTIONS)
     if unknown:
         raise ConfigError(f"unknown top-level tables: {', '.join(unknown)}")
+    for name, (section, key) in ENV_OVERRIDES.items():
+        if env.get(name, ""):
+            data.setdefault(section, {})[key] = env[name]
     base = source.parent
     cfg = Config(
         mirror=_section(Mirror, data.get("mirror", {}), base, "mirror"),
@@ -205,10 +218,14 @@ def validate_config(cfg: Config) -> None:
     if not _MIRROR_ID.fullmatch(cfg.mirror.id):
         raise ConfigError("mirror.id must be alphanumeric with dot, underscore, hyphen")
     if not re.fullmatch(r"dbid:[A-Za-z0-9_-]+", cfg.dropbox.expected_account_id):
-        raise ConfigError("dropbox.expected_account_id must be a full dbid: identifier")
+        raise ConfigError(
+            "MIRROR_DROPBOX_ACCOUNT_ID (or dropbox.expected_account_id) "
+            "must be a full dbid: identifier"
+        )
     if len(cfg.proton.expected_destination_uid.strip()) < 8:
         raise ConfigError(
-            "proton.expected_destination_uid must be at least 8 characters"
+            "MIRROR_PROTON_DESTINATION_UID (or proton.expected_destination_uid) "
+            "must be at least 8 characters"
         )
     try:
         validate_executable(cfg.proton.executable, label="proton.executable")

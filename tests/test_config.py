@@ -57,3 +57,39 @@ def test_numeric_floors(tmp_path):
         load_config(_write(tmp_path, GOOD + "\n[budget]\nlisting_floor_ratio = 1.5\n"))
     with pytest.raises(ConfigError, match="weekday"):
         load_config(_write(tmp_path, GOOD + "\n[reconcile]\nweekday = 7\n"))
+
+
+BARE = """
+[mirror]
+id = "test"
+"""
+
+ACCOUNT_ENV = {
+    "MIRROR_DROPBOX_ACCOUNT_ID": "dbid:from-vault",
+    "MIRROR_PROTON_DESTINATION": "/my-files/Elsewhere",
+    "MIRROR_PROTON_DESTINATION_UID": "uid-from-vault",
+}
+
+
+def test_account_values_come_from_the_environment(tmp_path):
+    cfg = load_config(_write(tmp_path, BARE), environ=ACCOUNT_ENV)
+    assert cfg.dropbox.expected_account_id == "dbid:from-vault"
+    assert cfg.proton.destination == "/my-files/Elsewhere"
+    assert cfg.proton.expected_destination_uid == "uid-from-vault"
+
+
+def test_environment_overrides_the_file(tmp_path):
+    cfg = load_config(_write(tmp_path, GOOD), environ=ACCOUNT_ENV)
+    assert cfg.dropbox.expected_account_id == "dbid:from-vault"
+    assert cfg.proton.expected_destination_uid == "uid-from-vault"
+
+
+def test_missing_account_id_names_the_variable(tmp_path):
+    with pytest.raises(ConfigError, match="MIRROR_DROPBOX_ACCOUNT_ID"):
+        load_config(_write(tmp_path, BARE), environ={})
+
+
+def test_missing_destination_uid_names_the_variable(tmp_path):
+    env = {"MIRROR_DROPBOX_ACCOUNT_ID": "dbid:from-vault"}
+    with pytest.raises(ConfigError, match="MIRROR_PROTON_DESTINATION_UID"):
+        load_config(_write(tmp_path, BARE), environ=env)

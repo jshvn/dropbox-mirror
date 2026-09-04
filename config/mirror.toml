@@ -1,17 +1,14 @@
-# The one behavior input. Runtime paths and secrets come from the environment.
+# The one behavior input. Runtime paths, secrets and the account identifiers
+# (MIRROR_DROPBOX_ACCOUNT_ID, MIRROR_PROTON_DESTINATION, MIRROR_PROTON_DESTINATION_UID)
+# come from the environment; see op.env.
 [mirror]
 id = "dropbox-mirror"
 
 [dropbox]
-expected_account_id = "dbid:AABGuZgQAtkJkfP2YPDUDu8F0xcIDZCktCk"
 root = ""
 page_limit = 2000
 minimum_call_interval_seconds = 0.1
 download_workers = 4
-
-[proton]
-destination = "/my-files/Dropbox"
-expected_destination_uid = "JG4skepsXf6_Nf3Nq9wCXskuwJ_P3SvU-gNQ-rcIs5AHh26CkLOIp_ldF1tqcQACNfBDf6gefBWlqx3_C--e6w==~9adM7wIv95xzYRt5q1mJMuIiOz8koFpYd9HzHeumL1nof1Urt886RX8r1V4A240yrWluyEGBXqnrZ-zel-2TFQ=="
 
 [budget]
 batch_gb = 4
