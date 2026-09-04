@@ -25,7 +25,7 @@ def test_defaults_and_derived_bytes(tmp_path):
     assert cfg.dropbox.content_base_url == "https://content.dropboxapi.com/2"
     assert cfg.dropbox.download_workers == 4
     assert cfg.budget.batch_gb == 4
-    assert cfg.budget.batch_files == 1000
+    assert cfg.budget.batch_files == 2000
     assert cfg.budget.batch_bytes == 4 * 1024**3
     assert cfg.budget.run_budget_minutes == 165
     assert cfg.budget.ceiling_gb == 4000

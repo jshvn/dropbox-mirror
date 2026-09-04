@@ -128,7 +128,6 @@ class Proton:
     executable: str = "proton-drive"
     destination: str = "/my-files/Dropbox"
     list_max_attempts: int = 8
-    download_max_attempts: int = 8
     initial_backoff_seconds: float = 3
     maximum_backoff_seconds: float = 120
     command_timeout_seconds: float = 300
@@ -138,7 +137,7 @@ class Proton:
 @dataclass(frozen=True)
 class Budget:
     batch_gb: float = 4
-    batch_files: int = 1000
+    batch_files: int = 2000
     run_budget_minutes: int = 165
     ceiling_gb: float = 4000
     disk_headroom_gb: float = 1
@@ -232,7 +231,6 @@ def validate_config(cfg: Config) -> None:
     _positive(cfg.dropbox.maximum_backoff_seconds, "dropbox.maximum_backoff_seconds")
     _positive_int(cfg.dropbox.download_workers, "dropbox.download_workers")
     _positive_int(cfg.proton.list_max_attempts, "proton.list_max_attempts")
-    _positive_int(cfg.proton.download_max_attempts, "proton.download_max_attempts")
     _nonnegative(cfg.proton.initial_backoff_seconds, "proton.initial_backoff_seconds")
     _positive(cfg.proton.maximum_backoff_seconds, "proton.maximum_backoff_seconds")
     _positive(cfg.proton.command_timeout_seconds, "proton.command_timeout_seconds")

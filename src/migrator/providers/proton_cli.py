@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import shutil
 import subprocess
 import time
 from collections import Counter
@@ -450,75 +449,6 @@ class ProtonCLIProvider:
             [self.cfg.proton.executable, "filesystem", "empty-trash"],
             phase,
         )
-
-    def download_file(self, remote_path: str, local_parent: Path, phase: str) -> None:
-        local_parent.mkdir(parents=True, exist_ok=True)
-        argv = [
-            self.cfg.proton.executable,
-            "filesystem",
-            "download",
-            "--file-conflict-strategy",
-            "skip",
-            "--folder-conflict-strategy",
-            "skip",
-            remote_path,
-            str(local_parent),
-        ]
-        delay = self.cfg.proton.initial_backoff_seconds
-        for attempt in range(1, self.cfg.proton.download_max_attempts + 1):
-            command_id = self.state.record_command_start(
-                "proton", "download", argv, attempt
-            )
-            try:
-                try:
-                    result = self.run(
-                        argv,
-                        text=True,
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.PIPE,
-                        check=False,
-                        timeout=self.cfg.proton.transfer_timeout_seconds,
-                    )
-                finally:
-                    self._after()
-            except subprocess.TimeoutExpired:
-                self.state.record_command_end(command_id, -1, "TIMEOUT")
-                self.logger.warning(
-                    phase,
-                    "download",
-                    "Proton CLI download timed out and will be retried",
-                    retry_count=attempt,
-                    provider_category="TIMEOUT",
-                )
-                if attempt < self.cfg.proton.download_max_attempts:
-                    shutil.rmtree(local_parent)
-                    local_parent.mkdir(parents=True)
-                    self.sleep(delay)
-                    delay = min(delay * 2, self.cfg.proton.maximum_backoff_seconds)
-                    continue
-                raise ProtonCLIError("Proton download exhausted retries")
-            category = (
-                "SUCCESS"
-                if result.returncode == 0
-                else _category(result.stderr, result.returncode)
-            )
-            self.state.record_command_end(command_id, result.returncode, category)
-            if result.returncode == 0:
-                return
-            self.logger.warning(
-                phase,
-                "download",
-                "Proton CLI download failed and will be retried",
-                retry_count=attempt,
-                provider_category=category,
-                raw_error=result.stderr[-4000:],
-            )
-            if attempt < self.cfg.proton.download_max_attempts:
-                shutil.rmtree(local_parent)
-                local_parent.mkdir(parents=True)
-                self.sleep(delay)
-                delay = min(delay * 2, self.cfg.proton.maximum_backoff_seconds)
-        raise ProtonCLIError("Proton download exhausted retries")
 
     def _mutation(
         self,
