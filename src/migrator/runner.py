@@ -8,7 +8,7 @@ from .config import load_config
 from .env import Runtime
 from .logging import RunLogger
 from .paths import WorkPaths
-from .phases import p10_inventory, p20_delta, p30_plan
+from .phases import p10_inventory, p20_delta, p30_plan, p70_report, p80_empty_trash
 from .phases.base import PhaseContext, PhaseError, PhaseResult
 from .state import State
 
@@ -25,6 +25,10 @@ PHASES: dict[str, PhaseDefinition] = {
     "inventory": PhaseDefinition(10, "inventory", "10_inventory", p10_inventory.run),
     "delta": PhaseDefinition(20, "delta", "20_delta", p20_delta.run),
     "plan": PhaseDefinition(30, "plan", "30_plan", p30_plan.run),
+    "report": PhaseDefinition(70, "report", "70_report", p70_report.run),
+    "empty-trash": PhaseDefinition(
+        80, "empty-trash", "80_empty_trash", p80_empty_trash.run
+    ),
 }
 
 
