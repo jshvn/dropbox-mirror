@@ -18,7 +18,7 @@ vars:
       fi
   # Every name in op.env crosses into the container by name, never by value.
   PASS_ENV:
-    sh: grep -v '^#' op.env | sed -n 's/=.*//p' | sed 's/^/-e /' | tr '\n' ' '; printf -- '-e RUN_BUDGET_MIN -e RECONCILE -e ENGINE -e MIRROR_VERBOSE -e GITHUB_RUN_ID'
+    sh: grep -v '^#' op.env | sed -n 's/=.*//p' | sed 's/^/-e /' | tr '\n' ' '; printf '%s' '-e RUN_BUDGET_MIN -e RECONCILE -e ENGINE -e MIRROR_VERBOSE -e GITHUB_RUN_ID'
   RUN_EPOCH:
     sh: date +%s
 
