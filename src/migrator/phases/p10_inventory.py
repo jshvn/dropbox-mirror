@@ -41,6 +41,7 @@ def run(ctx: PhaseContext) -> PhaseResult:
     run = ctx.state.current_run()
     purpose = f"run:{ctx.run_id}"
     token = access_token(ctx.cfg, ctx.runtime)
+    ctx.logger.add_secret(token)
     api = DropboxAPIProvider(ctx.cfg, ctx.state, ctx.logger, token=token)
     inventory_id = api.inventory(purpose, reuse_complete=True)
     with ctx.state.connection:

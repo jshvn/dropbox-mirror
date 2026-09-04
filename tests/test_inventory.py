@@ -113,3 +113,22 @@ def test_reconcile_run_gates_on_observer(state_context, monkeypatch):
     )
     with pytest.raises(PhaseError, match="discrepanc"):
         p10_inventory.run(ctx)
+
+
+def test_phase_registers_access_token_for_redaction(state_context, monkeypatch):
+    ctx = _ctx(state_context)
+    inventory_id = seed_api_inventory(
+        ctx.state, "run:1", [("/a.txt", 1, "h", 1, "file")]
+    )
+    token = "live-dropbox-token-xyz"
+    monkeypatch.setattr(p10_inventory, "access_token", lambda cfg, runtime: token)
+    monkeypatch.setattr(
+        p10_inventory.DropboxAPIProvider,
+        "inventory",
+        lambda self, purpose, reuse_complete=True: inventory_id,
+    )
+    p10_inventory.run(ctx)
+    ctx.logger.info("10_inventory", "probe", f"leaked token {token}")
+    human = (ctx.paths.logs / "migrate.log").read_text(encoding="utf-8")
+    assert token not in human
+    assert "[REDACTED]" in human

@@ -48,6 +48,12 @@ class RunLogger:
         self.console = console
         self.sink = sink
 
+    def add_secret(self, value: str) -> None:
+        if not value or value in self.secrets:
+            return
+        self.secrets.append(value)
+        self.secrets.sort(key=len, reverse=True)
+
     def redact(self, value: str | None) -> str | None:
         if value is None:
             return None
