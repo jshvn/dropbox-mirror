@@ -164,7 +164,7 @@ keep its client's defaults and let the throttle counters in the report drive cha
 |---|---|---|
 | Dropbox API | about 12 calls/s per user, always with `Retry-After` | listing serialized, one request in flight; downloads at most four in flight under a shared 10 calls/s limit; `Retry-After` honored and every occurrence counted |
 | Proton | none published; the CLI ships 5 files in flight and its own 429 back-off | CLI defaults kept as shipped; one upload invocation per batch, one trash pass, one listing walk a week, the pattern Proton's CLI page calls compliant |
-| GitHub runner | 6 h per job, ~14 GB disk | `timeout-minutes: 180`, `RUN_BUDGET_MIN=165`; a batch needs at most `2 * BATCH_GB` of disk |
+| GitHub runner | 6 h per job, ~14 GB disk | `timeout-minutes: 180`, `RUN_BUDGET_MIN=165`; a batch needs at most `BATCH_GB` of disk |
 
 Proton fair use is measured, not known: sustained GB/h and 429s in CLI output are the
 gauge, and `BATCH_GB` (default 4) drops if they say so. The budget leaves the last
