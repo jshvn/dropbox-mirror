@@ -19,13 +19,16 @@ destination = "/my-files/Dropbox"
 expected_destination_uid = "JG4skepsXf6_Nf3Nq9wCXskuwJ_P3SvU-gNQ-rcIs5AHh26CkLOIp_ldF1tqcQACNfBDf6gefBWlqx3_C--e6w==~9adM7wIv95xzYRt5q1mJMuIiOz8koFpYd9HzHeumL1nof1Urt886RX8r1V4A240yrWluyEGBXqnrZ-zel-2TFQ=="
 
 [budget]
-batch_gb = 4
+# Seed values. One CLI invocation uploads a whole batch and reports nothing until it
+# ends, so a batch is also the unit a stalled upload costs: keep batches small until the
+# first nights' throughput rows say the account sustains more. Raise batch_gb toward 4 then.
+batch_gb = 1
 # ponytail: the round-trip downloads one file per CLI process, seconds each, so a batch
-# is bounded by its file count as much as by its bytes. 1,000 files fit the 165 min budget
-# only while the measured cost stays under about 9 s per file (README, first-run checks);
+# is bounded by its file count as much as by its bytes. 250 files fit the 165 min budget
+# while the measured cost stays under about 36 s per file (README, first-run checks);
 # past that the round-trip defers the rest of the batch and the next run re-plans it. The
 # upgrade path is a recursive folder download when a batch covers a whole folder.
-batch_files = 1000
+batch_files = 250
 run_budget_minutes = 165
 ceiling_gb = 4000
 disk_headroom_gb = 1
