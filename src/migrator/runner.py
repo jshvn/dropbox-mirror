@@ -14,6 +14,7 @@ from .phases import (
     p30_plan,
     p40_batches,
     p50_trash,
+    p60_reconcile,
     p70_report,
     p80_empty_trash,
 )
@@ -35,6 +36,7 @@ PHASES: dict[str, PhaseDefinition] = {
     "plan": PhaseDefinition(30, "plan", "30_plan", p30_plan.run),
     "batches": PhaseDefinition(40, "batches", "40_batches", p40_batches.run),
     "trash": PhaseDefinition(50, "trash", "50_trash", p50_trash.run),
+    "reconcile": PhaseDefinition(60, "reconcile", "60_reconcile", p60_reconcile.run),
     "report": PhaseDefinition(70, "report", "70_report", p70_report.run),
     "empty-trash": PhaseDefinition(
         80, "empty-trash", "80_empty_trash", p80_empty_trash.run
