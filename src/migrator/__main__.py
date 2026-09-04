@@ -1,0 +1,49 @@
+from __future__ import annotations
+
+import argparse
+import sys
+
+from .env import Runtime
+from .runner import PHASES, run_phase
+
+# Pre-state and utility commands register here in later tasks: {name: callable(runtime, args)}
+COMMANDS: dict[str, object] = {}
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="migrator", description="Dropbox to Proton Drive mirror"
+    )
+    parser.add_argument(
+        "--apply", action="store_true", help="permit mutation phases to act"
+    )
+    sub = parser.add_subparsers(dest="command", required=True)
+    for command in PHASES:
+        sub.add_parser(command, help=f"run the {command} phase")
+    for command in COMMANDS:
+        p = sub.add_parser(command)
+        p.add_argument("args", nargs="*")
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    runtime = Runtime.from_environ()
+    try:
+        if args.command in PHASES:
+            status = run_phase(args.command, apply=args.apply, runtime=runtime)
+            print(f"{args.command}: {status}")
+            return 0 if status in {"PASS", "PLANNED"} else 2
+        return int(COMMANDS[args.command](runtime, args.args))  # type: ignore[operator]
+    except Exception as exc:  # noqa: BLE001 - every class: a traceback would print provider stderr
+        # Error text may carry provider stderr with path names; CI sees the class only.
+        detail = f": {exc}" if runtime.verbose else ""
+        print(f"ERROR: {type(exc).__name__}{detail}", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        print("INTERRUPTED", file=sys.stderr)
+        return 130
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

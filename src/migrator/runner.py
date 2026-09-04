@@ -1,0 +1,84 @@
+from __future__ import annotations
+
+import os
+from collections.abc import Callable
+from dataclasses import dataclass
+
+from .config import load_config
+from .env import Runtime
+from .logging import RunLogger
+from .paths import WorkPaths
+from .phases.base import PhaseContext, PhaseError, PhaseResult
+from .state import State
+
+
+@dataclass(frozen=True)
+class PhaseDefinition:
+    number: int
+    command: str
+    name: str
+    run: Callable[[PhaseContext], PhaseResult]
+
+
+# Filled in by the phase modules' tasks; Task 10 onward adds one line each.
+PHASES: dict[str, PhaseDefinition] = {}
+
+
+def run_phase(command: str, *, apply: bool, runtime: Runtime) -> str:
+    phase = PHASES[command]
+    cfg = load_config(runtime.config_path)
+    paths = WorkPaths.from_runtime(runtime)
+    paths.ensure()
+    # The CLI's cache dir must follow MIRROR_WORK_DIR, not the image default.
+    os.environ["PROTON_DRIVE_CACHE_DIR"] = str(paths.session)
+    os.environ["PROTON_DRIVE_CREDENTIALS_STORE"] = "unsafe_file"
+    state = State(paths.state_db, cfg.mirror.id)
+    try:
+        state.initialize_migration(cfg.source_file, cfg.source_sha256)
+        run_id = int(state.current_run()["id"])
+        logger = RunLogger(
+            paths.logs, secrets=runtime.secrets(), console=True, sink=state.record_event
+        )
+        phase_run_id = state.start_phase(
+            phase.number,
+            phase.name,
+            apply=apply,
+            inputs={"run_id": run_id, "config_sha256": cfg.source_sha256},
+            command_parameters={"apply": apply},
+        )
+        ctx = PhaseContext(
+            cfg, paths, state, logger, apply, phase_run_id, run_id, runtime
+        )
+        logger.info(phase.name, "start", f"starting phase {phase.command}")
+        try:
+            result = phase.run(ctx)
+        except BaseException as exc:
+            logger.error(
+                phase.name,
+                "failure",
+                f"phase {phase.command} failed",
+                provider_category=type(exc).__name__,
+                raw_error=str(exc),
+            )
+            state.complete_phase(
+                phase_run_id,
+                "FAIL",
+                outputs={"error_type": type(exc).__name__},
+                error_summary=logger.redact(str(exc)),
+            )
+            if isinstance(exc, PhaseError):
+                raise
+            raise PhaseError(f"{phase.command} failed: {type(exc).__name__}") from exc
+        for role, path, row_count in result.artifacts:
+            state.record_artifact(
+                phase_run_id, role, path, paths.root, row_count=row_count
+            )
+        state.complete_phase(phase_run_id, result.status, outputs=result.outputs)
+        logger.info(
+            phase.name,
+            "complete",
+            f"phase {phase.command} completed with {result.status}",
+        )
+        return result.status
+    finally:
+        state.close()
