@@ -1,0 +1,35 @@
+# The one behavior input. Runtime paths and secrets come from the environment.
+[mirror]
+id = "dropbox-mirror"
+
+[dropbox]
+expected_account_id = "dbid:REPLACE_AT_BOOTSTRAP"
+root = ""
+page_limit = 2000
+minimum_call_interval_seconds = 0.1
+
+[rclone]
+remote = "dropbox"
+tps_limit = 10
+tps_burst = 1
+transfers = 4
+
+[proton]
+destination = "/my-files/Dropbox"
+expected_destination_uid = "REPLACE_AT_BOOTSTRAP"
+
+[budget]
+batch_gb = 4
+# ponytail: the round-trip downloads one file per CLI process, seconds each, so a batch
+# is bounded by its file count as much as by its bytes. 5,000 fits the budget only when
+# the measured cost is under about 1.8 s per file (README, first-run checks); a batch
+# that cannot finish never checkpoints and repeats every run. The upgrade path is a
+# recursive folder download when a batch covers a whole folder.
+batch_files = 5000
+run_budget_minutes = 165
+ceiling_gb = 4000
+disk_headroom_gb = 1
+listing_floor_ratio = 0.5
+
+[reconcile]
+weekday = 0
