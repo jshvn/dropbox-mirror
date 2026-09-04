@@ -90,6 +90,17 @@ def test_fetch_moves_files_to_display_paths_and_marks_vanished(state_context):
     assert statuses == {"/docs/réport.txt": "FETCHED", "/docs/gone.txt": "VANISHED"}
 
 
+def test_fetch_refuses_to_rerun_once_items_have_advanced(state_context):
+    ctx = _ctx(state_context)
+    files = {"/a.txt": b"hello"}
+    batch_id = _batch(ctx, files)
+    batch.fetch(ctx, FakeRclone(files), batch_id)
+    batch.verify(ctx, batch_id)
+    with pytest.raises(PhaseError, match="past fetch"):
+        batch.fetch(ctx, FakeRclone(files), batch_id)
+    assert (ctx.paths.staging / "a.txt").read_bytes() == b"hello"
+
+
 def test_verify_records_hashes_and_skips_a_mismatch(state_context):
     ctx = _ctx(state_context)
     files = {"/a.txt": b"hello", "/Docs/b.txt": b"world"}

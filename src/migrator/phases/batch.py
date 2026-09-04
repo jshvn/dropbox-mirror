@@ -101,7 +101,18 @@ def resolve_children(
 
 def fetch(ctx: PhaseContext, rclone: Any, batch_id: int) -> dict[str, int]:
     """rclone copies by path_lower (Dropbox's own spelling, so the match is exact);
-    each file is then moved to its NFC display path."""
+    each file is then moved to its NFC display path. Fetch owns staging outright: once
+    any item in the batch has moved past fetch's own PLANNED/VANISHED states, a second
+    call would wipe staging out from under files verify/upload already depend on, so it
+    refuses to run rather than silently losing them."""
+    advanced = [
+        r for r in items(ctx, batch_id) if r["status"] not in ("PLANNED", "VANISHED")
+    ]
+    if advanced:
+        raise PhaseError(
+            f"batch {batch_id} has {len(advanced)} item(s) past fetch; "
+            "fetch runs once per batch and must not re-clear staging underneath them"
+        )
     _clear(ctx.paths.staging)
     rows = items(ctx, batch_id, "PLANNED")
     list_file = ctx.paths.root / "files-from.txt"
