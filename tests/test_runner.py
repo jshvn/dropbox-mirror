@@ -69,6 +69,21 @@ def test_run_phase_records_fail_and_reraises(state_context, monkeypatch):
     state.close()
 
 
+@pytest.mark.parametrize(("status", "code"), [("PASS", 0), ("PLANNED", 0), ("FAIL", 2)])
+def test_main_maps_phase_status_to_exit_code(state_context, monkeypatch, status, code):
+    from migrator.__main__ import main
+
+    runtime = _prepare(state_context)
+    monkeypatch.setitem(
+        runner.PHASES, "probe", runner.PhaseDefinition(99, "probe", "99_probe", None)
+    )
+    monkeypatch.setattr(
+        "migrator.__main__.run_phase", lambda command, *, apply, runtime: status
+    )
+    monkeypatch.setattr("migrator.__main__.Runtime.from_environ", lambda: runtime)
+    assert main(["probe"]) == code
+
+
 def test_main_hides_error_text_unless_verbose(state_context, monkeypatch, capsys):
     from migrator.__main__ import main
 
