@@ -3,7 +3,7 @@
 id = "dropbox-mirror"
 
 [dropbox]
-expected_account_id = "dbid:REPLACE_AT_BOOTSTRAP"
+expected_account_id = "dbid:AABGuZgQAtkJkfP2YPDUDu8F0xcIDZCktCk"
 root = ""
 page_limit = 2000
 minimum_call_interval_seconds = 0.1
@@ -16,7 +16,7 @@ transfers = 4
 
 [proton]
 destination = "/my-files/Dropbox"
-expected_destination_uid = "REPLACE_AT_BOOTSTRAP"
+expected_destination_uid = "JG4skepsXf6_Nf3Nq9wCXskuwJ_P3SvU-gNQ-rcIs5AHh26CkLOIp_ldF1tqcQACNfBDf6gefBWlqx3_C--e6w==~C2RXpKCKx4Ca638uit6L1SYLQzq9e8gT0JERvcyQ3fgmeoQyCP6WKxYkqRwHmwrhDcYG7OR-I1z80RyRuaBFMA=="
 
 [budget]
 batch_gb = 4
