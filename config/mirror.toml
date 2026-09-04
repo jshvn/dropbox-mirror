@@ -16,6 +16,10 @@ batch_gb = 4
 # costs roughly 22 minutes of the 165-minute run_budget_minutes, leaving room for
 # several batches a run.
 batch_files = 2000
+# A file over this is left out of every plan: a GitHub runner guarantees 14 GB of
+# disk, the staging of one file needs the file plus disk_headroom_gb, and the state
+# and image share the same disk. The report counts what was left out.
+max_file_gb = 12
 run_budget_minutes = 165
 ceiling_gb = 4000
 disk_headroom_gb = 1

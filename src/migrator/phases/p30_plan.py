@@ -51,10 +51,15 @@ def run(ctx: PhaseContext) -> PhaseResult:
     rows = connection.execute(
         "SELECT * FROM delta_changed WHERE run_id=? ORDER BY path_lower", (ctx.run_id,)
     ).fetchall()
-    largest = max((int(r["size"]) for r in rows), default=0)
     free = shutil.disk_usage(ctx.paths.root).free
+    # A file the disk cannot stage is left out of the plan rather than failing the run:
+    # a failed batch stops the chain, and the same file would stop it every run after.
+    file_cap = min(budget.max_file_bytes, free - budget.headroom_bytes)
+    oversized = [r for r in rows if int(r["size"]) > file_cap]
+    rows = [r for r in rows if int(r["size"]) <= file_cap]
+    largest = max((int(r["size"]) for r in rows), default=0)
     needed = (
-        min(budget.batch_bytes, sum(int(r["size"]) for r in rows))
+        max(largest, min(budget.batch_bytes, sum(int(r["size"]) for r in rows)))
         + budget.headroom_bytes
     )
     if largest and free < needed:
@@ -94,6 +99,9 @@ def run(ctx: PhaseContext) -> PhaseResult:
         "largest_file": largest,
         "tree_bytes": tree_bytes,
         "free_bytes": free,
+        "file_cap_bytes": file_cap,
+        "oversized_files": len(oversized),
+        "oversized_bytes": sum(int(r["size"]) for r in oversized),
     }
     ctx.logger.info(PHASE, "gate", "batches planned", **outputs)
     return PhaseResult(outputs=outputs)

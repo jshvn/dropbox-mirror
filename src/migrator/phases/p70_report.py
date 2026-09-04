@@ -171,6 +171,13 @@ def figures(ctx: PhaseContext) -> dict[str, Any]:
     cumulative_verified = int(
         connection.execute("SELECT COUNT(*) FROM mirror_objects").fetchone()[0]
     )
+    plan_row = connection.execute(
+        """SELECT outputs_json FROM phase_runs WHERE phase_name='30_plan'
+           AND json_extract(inputs_json, '$.run_id') = ? AND outputs_json IS NOT NULL
+           ORDER BY id DESC LIMIT 1""",
+        (ctx.run_id,),
+    ).fetchone()
+    plan = json.loads(plan_row["outputs_json"]) if plan_row else {}
     reconcile_fields = _reconcile_figures(ctx)
     return {
         "mirror": {
@@ -182,6 +189,8 @@ def figures(ctx: PhaseContext) -> dict[str, Any]:
             if inventory_bytes
             else 100.0,
             "non_downloadable": int(inventory["non_downloadable"] or 0),
+            "oversized_files": int(plan.get("oversized_files", 0)),
+            "oversized_bytes": int(plan.get("oversized_bytes", 0)),
             "batches_remaining": int(remaining["n"]),
             "bytes_remaining": int(remaining["bytes"]),
             "projected_runs_remaining": projected,

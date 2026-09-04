@@ -55,16 +55,21 @@ def _batch(ctx, files: dict[str, bytes]) -> int:
     return batch_id
 
 
-def test_fetch_downloads_to_path_lower_and_marks_vanished(state_context):
+def test_fetch_stages_under_path_display_and_marks_vanished(state_context):
     ctx = _ctx(state_context)
     files = {"/Docs/Réport.txt": b"report", "/Docs/gone.txt": b"x"}
     batch_id = _batch(ctx, files)
     dropbox = FakeDropbox(files, missing=["/Docs/gone.txt"])
     counts = batch.fetch(ctx, dropbox, batch_id)
     assert counts == {"fetched": 1, "vanished": 1}
+    # the API is asked by path_lower; the file lands under Dropbox's own casing
     assert sorted(dropbox.downloaded) == ["/docs/gone.txt", "/docs/réport.txt"]
-    assert (ctx.paths.staging / "docs" / "réport.txt").read_bytes() == b"report"
-    assert not (ctx.paths.staging / "docs" / "gone.txt").exists()
+    assert (ctx.paths.staging / "Docs" / "Réport.txt").read_bytes() == b"report"
+    assert sorted(p.name for p in ctx.paths.staging.rglob("*")) == [
+        "Docs",
+        "Réport.txt",
+    ]
+    assert not (ctx.paths.staging / "Docs" / "gone.txt").exists()
     statuses = {r["path_lower"]: r["status"] for r in batch.items(ctx, batch_id)}
     assert statuses == {"/docs/réport.txt": "FETCHED", "/docs/gone.txt": "VANISHED"}
 
@@ -161,7 +166,7 @@ def test_verify_records_hashes_and_skips_a_mismatch(state_context):
     files = {"/a.txt": b"hello", "/Docs/b.txt": b"world"}
     batch_id = _batch(ctx, files)
     batch.fetch(ctx, FakeDropbox(files), batch_id)
-    (ctx.paths.staging / "docs" / "b.txt").write_bytes(b"edited mid-run")
+    (ctx.paths.staging / "Docs" / "b.txt").write_bytes(b"edited mid-run")
     counts = batch.verify(ctx, batch_id)
     assert counts == {"verified": 1, "bytes": 5, "hash_mismatch": 1}
     rows = {r["path_lower"]: r for r in batch.items(ctx, batch_id)}
@@ -171,7 +176,7 @@ def test_verify_records_hashes_and_skips_a_mismatch(state_context):
     )
     assert rows["/docs/b.txt"]["status"] == "HASH_MISMATCH"
     assert not (
-        ctx.paths.staging / "docs"
+        ctx.paths.staging / "Docs"
     ).exists()  # wrong bytes never reach the upload
 
 
@@ -196,8 +201,8 @@ def test_upload_passes_top_level_children(state_context):
     }
     sources, destination = proton.uploads[0]
     assert sources == [
+        str(ctx.paths.staging / "Docs"),
         str(ctx.paths.staging / "b.txt"),
-        str(ctx.paths.staging / "docs"),
     ]
     assert destination == "/my-files/Dropbox"
 

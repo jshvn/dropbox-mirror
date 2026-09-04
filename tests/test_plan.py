@@ -122,7 +122,7 @@ def test_plan_refuses_tree_over_ceiling(state_context, monkeypatch):
 
 def test_plan_refuses_batch_disk_cannot_hold_staging(state_context, monkeypatch):
     ctx = _ctx(state_context, Budget(batch_gb=1, ceiling_gb=1, disk_headroom_gb=0))
-    _changed(ctx, [("/a", 600)])
+    _changed(ctx, [("/a", 300), ("/b", 300)])
     monkeypatch.setattr(
         p30_plan.shutil, "disk_usage", lambda _: type("U", (), {"free": 500})()
     )
@@ -141,3 +141,36 @@ def test_plan_is_idempotent_within_a_run(state_context, monkeypatch):
     assert (
         ctx.state.connection.execute("SELECT COUNT(*) FROM batches").fetchone()[0] == 1
     )
+
+
+def test_plan_leaves_out_files_the_disk_or_cap_cannot_hold(state_context, monkeypatch):
+    # cap 12 bytes from config; disk allows 100 - 10 headroom = 90; the config cap wins
+    ctx = _ctx(
+        state_context,
+        Budget(
+            batch_gb=10 / 1024**3,
+            max_file_gb=12 / 1024**3,
+            ceiling_gb=1,
+            disk_headroom_gb=10 / 1024**3,
+        ),
+    )
+    _changed(ctx, [("/a", 6), ("/big", 12), ("/huge", 13), ("/vast", 50)])
+    monkeypatch.setattr(
+        p30_plan.shutil, "disk_usage", lambda _: type("U", (), {"free": 100})()
+    )
+    result = p30_plan.run(ctx)
+    assert result.outputs["oversized_files"] == 2
+    assert result.outputs["oversized_bytes"] == 63
+    assert result.outputs["largest_file"] == 12
+    rows = ctx.state.connection.execute(
+        "SELECT bytes, file_count FROM batches WHERE run_id=? ORDER BY number",
+        (ctx.run_id,),
+    ).fetchall()
+    assert [tuple(r) for r in rows] == [(6, 1), (12, 1)]
+    # a tighter disk lowers the cap below the config value
+    monkeypatch.setattr(
+        p30_plan.shutil, "disk_usage", lambda _: type("U", (), {"free": 21})()
+    )
+    result = p30_plan.run(ctx)
+    assert result.outputs["file_cap_bytes"] == 11
+    assert result.outputs["oversized_files"] == 3

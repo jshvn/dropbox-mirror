@@ -34,6 +34,40 @@ def prune_inventories(connection: sqlite3.Connection, keep: int = 2) -> int:
     return pruned
 
 
+def recase_display_paths(connection: sqlite3.Connection, inventory_id: int) -> int:
+    """Dropbox cases path_display per entry, so the entries of one folder disagree about
+    their parents' spelling; a folder row's own name is that folder's one spelling.
+    Every entry's path_display is rebuilt from its ancestors' names plus its own, so the
+    tree that reaches staging and Proton spells each folder one way."""
+    rows = connection.execute(
+        "SELECT rowid, path_lower, path_display, name, tag FROM dropbox_objects WHERE inventory_id=?",
+        (inventory_id,),
+    ).fetchall()
+    folder_names = {
+        str(r["path_lower"]): str(r["name"]) for r in rows if r["tag"] == "folder"
+    }
+    updates = []
+    for row in rows:
+        lower_parts = str(row["path_lower"]).lstrip("/").split("/")
+        display_parts = str(row["path_display"]).lstrip("/").split("/")
+        if len(display_parts) != len(lower_parts):
+            display_parts = lower_parts
+        prefix = ""
+        rebuilt = []
+        for lower, display in zip(lower_parts[:-1], display_parts[:-1], strict=True):
+            prefix += "/" + lower
+            rebuilt.append(folder_names.get(prefix, display))
+        rebuilt.append(str(row["name"]))
+        display_path = "/" + "/".join(rebuilt)
+        if display_path != str(row["path_display"]):
+            updates.append((display_path, int(row["rowid"])))
+    with connection:
+        connection.executemany(
+            "UPDATE dropbox_objects SET path_display=? WHERE rowid=?", updates
+        )
+    return len(updates)
+
+
 def run(ctx: PhaseContext) -> PhaseResult:
     purpose = f"run:{ctx.run_id}"
     token = access_token(ctx.cfg, ctx.runtime)
@@ -49,6 +83,7 @@ def run(ctx: PhaseContext) -> PhaseResult:
             "AND is_downloadable=1 AND (content_hash IS NULL OR size IS NULL)",
             (inventory_id,),
         ).rowcount
+    recased = recase_display_paths(ctx.state.connection, inventory_id)
     summary = ctx.state.connection.execute(
         """
         SELECT
@@ -68,6 +103,7 @@ def run(ctx: PhaseContext) -> PhaseResult:
         "bytes": int(summary["bytes"] or 0),
         "non_downloadable": int(summary["non_downloadable"] or 0),
         "unhashed": int(unhashed),
+        "recased": recased,
         "pruned_inventories": prune_inventories(ctx.state.connection),
     }
     ctx.logger.info(PHASE, "gate", "Dropbox inventory complete", **outputs)

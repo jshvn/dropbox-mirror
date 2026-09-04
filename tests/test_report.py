@@ -137,6 +137,8 @@ def test_figures_and_markdown_carry_counts_never_names(
         "mirrored_bytes": 100,
         "percent_mirrored": 66.7,
         "non_downloadable": 1,
+        "oversized_files": 0,
+        "oversized_bytes": 0,
         "batches_remaining": 1,
         "bytes_remaining": 50,
         "projected_runs_remaining": 1,

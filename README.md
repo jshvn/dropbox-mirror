@@ -43,11 +43,11 @@ commands; the rest are phases and record their evidence in the state.
 | `clock` | Stamps the run start epoch, UTC hour and weekday to `.run/clock.json`; clears `staging/`, the report and the chain marker. |
 | `session` | Fetches `.state/session.tar.age` from R2, decrypts it with the age identity, unpacks it to `.run/session/`, which is `PROTON_DRIVE_CACHE_DIR` for every later Proton call. |
 | `state` | Fetches `.state/state.sqlite.xz.age` and starts the run row. A missing state is accepted as an empty mirror only when `.state/history/` is empty too and the bucket answers a probe; a missing state beside history is refused, because a lost state must never look like an empty mirror. |
-| `inventory` | Recursive Dropbox `files/list_folder` walk, each page committed with its cursor. Entries with no `content_hash` (Paper docs, cloud files) are recorded as non-downloadable and excluded. Keeps the newest two inventories. |
+| `inventory` | Recursive Dropbox `files/list_folder` walk, each page committed with its cursor. Entries with no `content_hash` (Paper docs, cloud files) are recorded as non-downloadable and excluded. Rebuilds every entry's display path from its ancestor folders' own names, because Dropbox cases the parent segments of `path_display` inconsistently between entries of one folder; that rebuilt path is what staging and Proton see, and the lowercased path stays the key. Keeps the newest two inventories. |
 | `delta` | Compares the inventory against `mirror_objects` on `(path_lower, size, content_hash)`. Refuses a listing under half the mirrored file count so a truncated listing can never become a trash list. |
-| `plan` | Refuses a tree over `ceiling_gb` or a batch the runner's disk cannot hold in staging. Packs changed files into batches of at most `batch_gb` and `batch_files`, an oversized file being a batch by itself. Earlier PLANNED batches are dropped; this run's plan is the only plan. |
+| `plan` | Refuses a tree over `ceiling_gb` or a batch the runner's disk cannot hold in staging. Leaves out any file over `max_file_gb`, or over what the disk can stage beside its headroom, and counts it as oversized in the report; a file that would fail its batch must not stop the chain. Packs the rest into batches of at most `batch_gb` and `batch_files`, a file over `batch_gb` being a batch by itself. Earlier PLANNED batches are dropped; this run's plan is the only plan. |
 | `batches` | Touches the Proton session once with a listing of the destination's parent, then runs each batch through the five steps below. Before each batch it stops when the elapsed time plus the longest batch so far would pass the budget; stopping with batches left is a success that marks the run for chaining. |
-| `fetch` | Empties staging and downloads the batch from Dropbox over the API by listed path, `download_workers` files in flight. A path that vanished since listing is counted and skipped. |
+| `fetch` | Empties staging and downloads the batch from Dropbox over the API by listed path, `download_workers` files in flight, each file landing under its display path so Proton receives Dropbox's casing. A path that vanished since listing is counted and skipped. |
 | `verify` | Recomputes every staged file's Dropbox content hash and records SHA-1 and SHA-256. A mismatch is a file edited between listing and fetch: removed, counted, never recorded. A batch where every file mismatches fails. |
 | `upload` | One `proton-drive filesystem upload` of the staging tree with `-f create-new-revision -d merge --skip-thumbnails`; Proton skips files whose content it already holds. |
 | `confirm` | Reads the upload summary and matches transferred and skipped counts against the batch; failures must be zero and the failures list empty, or nothing is recorded. Proton's server verifies every ciphertext block hash at upload; the weekly reconcile walk is the independent observation of what Proton holds. |
@@ -351,7 +351,8 @@ and rejects unknown keys. It names no account.
 | `dropbox.root` | Subtree to mirror; empty means the whole Dropbox. |
 | `dropbox.page_limit`, `minimum_call_interval_seconds` | Listing page size and the serialised call spacing. |
 | `dropbox.download_workers` | Files fetched in flight during `fetch`, under the shared Dropbox rate limit. |
-| `budget.batch_gb`, `batch_files` | A batch's byte and file caps; an oversized file is a batch by itself. |
+| `budget.batch_gb`, `batch_files` | A batch's byte and file caps; a file over `batch_gb` is a batch by itself. |
+| `budget.max_file_gb` | Largest file a plan will stage; bigger files are left out and counted as oversized. A GitHub runner guarantees 14 GB of disk. |
 | `budget.run_budget_minutes` | Wall-clock budget from the run's start; batches stop starting when it runs out. |
 | `budget.ceiling_gb` | Refuse a Dropbox tree larger than this. |
 | `budget.disk_headroom_gb` | Free disk the runner must keep beyond a batch's staging. |
@@ -376,7 +377,8 @@ The step summary is built from the state database alone, so `task status` on a l
 shows the same figures as the Actions page. It carries counts only, never a path name:
 
 - **Mirror status**: inventory files and bytes, mirrored files and bytes, percent mirrored,
-  non-downloadable entries, batches and bytes remaining, projected runs remaining, chain.
+  non-downloadable entries, oversized files and bytes, batches and bytes remaining,
+  projected runs remaining, chain.
 - **This run**: budget used, batches planned and completed, files fetched, vanished and
   hash-mismatched, files and bytes uploaded, skipped as content-identical by Proton,
   confirmed, checkpointed, trashed.
@@ -438,6 +440,14 @@ is ignored by git.
   as it needs.
 - **A flag such as `RUN_BUDGET_MIN` seems ignored.** The report's "budget minutes" row
   shows what the run saw. `RECONCILE` takes the literal word `true`.
+- **The report shows oversized files.** They are over `max_file_gb` or over what the
+  runner's disk could stage, and percent mirrored stays short by their bytes. Upload them
+  by hand to their Dropbox path under the destination: the reconcile walk leaves alone any
+  Proton node whose path the Dropbox listing knows, so a manual copy is never trashed.
+  Or shrink or move the file in Dropbox.
+- **A case-only rename in Dropbox does not reach Proton.** Files are keyed by their
+  lowercased path, so changing only the case of a name changes nothing in the delta and
+  Proton keeps the old spelling. Rename to something else and back if the case matters.
 - **Move the mirror folder in Proton.** Rename or move it anywhere under My files, then
   change the vault's `proton/destination`. The UID survives both, and every run verifies
   it.

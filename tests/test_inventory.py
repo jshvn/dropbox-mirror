@@ -42,6 +42,7 @@ def test_inventory_records_counts_and_run_link(state_context, monkeypatch):
         "bytes": 3,
         "non_downloadable": 1,
         "unhashed": 0,
+        "recased": 0,
         "pruned_inventories": 0,
     }
     assert ctx.state.current_run()["inventory_id"] == inventory_id
@@ -99,3 +100,37 @@ def test_phase_registers_access_token_for_redaction(state_context, monkeypatch):
     human = (ctx.paths.logs / "migrate.log").read_text(encoding="utf-8")
     assert token not in human
     assert "[REDACTED]" in human
+
+
+def test_inventory_recases_paths_from_folder_names(state_context, monkeypatch):
+    ctx = _ctx(state_context)
+    rows = [
+        ("/Apps", None, None, 1, "folder"),
+        ("/apps/Outlook", None, None, 1, "folder"),
+        ("/apps/outlook/Report.pdf", 3, "h1", 1, "file"),
+        ("/Apps/Outlook/other.pdf", 2, "h2", 1, "file"),
+    ]
+    inventory_id = seed_api_inventory(ctx.state, "run:1", rows)
+    monkeypatch.setattr(p10_inventory, "access_token", lambda cfg, runtime: "tok")
+    monkeypatch.setattr(
+        p10_inventory.DropboxAPIProvider,
+        "inventory",
+        lambda self, purpose, reuse_complete=True: inventory_id,
+    )
+    result = p10_inventory.run(ctx)
+    assert result.outputs["recased"] == 2
+    displays = {
+        r["path_lower"]: r["path_display"]
+        for r in ctx.state.connection.execute(
+            "SELECT path_lower, path_display FROM dropbox_objects WHERE inventory_id=?",
+            (inventory_id,),
+        )
+    }
+    assert displays == {
+        "/apps": "/Apps",
+        "/apps/outlook": "/Apps/Outlook",
+        "/apps/outlook/report.pdf": "/Apps/Outlook/Report.pdf",
+        "/apps/outlook/other.pdf": "/Apps/Outlook/other.pdf",
+    }
+    # a second pass finds nothing left to rewrite
+    assert p10_inventory.recase_display_paths(ctx.state.connection, inventory_id) == 0

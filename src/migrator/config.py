@@ -140,6 +140,7 @@ class Proton:
 class Budget:
     batch_gb: float = 4
     batch_files: int = 2000
+    max_file_gb: float = 12
     run_budget_minutes: int = 165
     ceiling_gb: float = 4000
     disk_headroom_gb: float = 1
@@ -148,6 +149,10 @@ class Budget:
     @property
     def batch_bytes(self) -> int:
         return round(self.batch_gb * 1024**3)
+
+    @property
+    def max_file_bytes(self) -> int:
+        return round(self.max_file_gb * 1024**3)
 
     @property
     def ceiling_bytes(self) -> int:
@@ -254,6 +259,7 @@ def validate_config(cfg: Config) -> None:
     _positive(cfg.proton.transfer_timeout_seconds, "proton.transfer_timeout_seconds")
     _positive(cfg.budget.batch_gb, "budget.batch_gb")
     _positive_int(cfg.budget.batch_files, "budget.batch_files")
+    _positive(cfg.budget.max_file_gb, "budget.max_file_gb")
     _positive_int(cfg.budget.run_budget_minutes, "budget.run_budget_minutes")
     _positive(cfg.budget.ceiling_gb, "budget.ceiling_gb")
     _nonnegative(cfg.budget.disk_headroom_gb, "budget.disk_headroom_gb")

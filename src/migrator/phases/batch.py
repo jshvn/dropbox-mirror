@@ -49,8 +49,10 @@ def _details(reason: str, **extra: Any) -> str:
     return json.dumps({"reason": reason, **extra}, sort_keys=True)
 
 
-def local_path(paths: Any, path_lower: str) -> Path:
-    return paths.staging / path_lower.lstrip("/")
+def local_path(paths: Any, path_display: str) -> Path:
+    """Staging is laid out by path_display so Proton receives Dropbox's own casing;
+    path_lower stays the key and the API path."""
+    return paths.staging / path_display.lstrip("/")
 
 
 def parent_cli_path(destination: str, path_display: str) -> str:
@@ -99,7 +101,7 @@ def resolve_children(
 
 def fetch(ctx: PhaseContext, dropbox: Any, batch_id: int) -> dict[str, int]:
     """One Dropbox API call per file, run through a thread pool; each lands at its
-    path_lower under staging. Fetch owns staging outright: once any item in the batch
+    path_display under staging. Fetch owns staging outright: once any item in the batch
     has moved past fetch's own PLANNED/VANISHED states, a second call would wipe staging
     out from under files verify/upload already depend on, so it refuses to run rather
     than silently losing them."""
@@ -115,7 +117,7 @@ def fetch(ctx: PhaseContext, dropbox: Any, batch_id: int) -> dict[str, int]:
     rows = items(ctx, batch_id, "PLANNED")
 
     def _download(row: sqlite3.Row) -> list[RetryEvent]:
-        target = local_path(ctx.paths, str(row["path_lower"]))
+        target = local_path(ctx.paths, str(row["path_display"]))
         target.parent.mkdir(parents=True, exist_ok=True)
         return dropbox.download(str(row["path_lower"]), target)
 
@@ -165,7 +167,7 @@ def verify(ctx: PhaseContext, batch_id: int) -> dict[str, int]:
     counts: Counter[str] = Counter()
     rows = items(ctx, batch_id, "FETCHED")
     for row in rows:
-        staged = local_path(ctx.paths, str(row["path_lower"]))
+        staged = local_path(ctx.paths, str(row["path_display"]))
         hashes = hash_file(staged)
         if hashes.size != int(row["size"]) or hashes.dropbox_content_hash != str(
             row["content_hash"]
