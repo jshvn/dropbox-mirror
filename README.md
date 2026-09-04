@@ -229,8 +229,9 @@ builds the toolbox image on the runner, which takes a few minutes before any ste
 #### Seeding a large tree
 
 For anything sizeable, run `task sync` from a laptop or atium in a loop instead: the seed
-is Dropbox and Proton API time (about 0.65 s per uploaded file, measured), which Actions
-minutes cannot absorb. At that rate a 200,000-file tree takes on the order of 45 hours.
+is Dropbox and Proton API time, which Actions minutes cannot absorb. For a 200,000-file
+tree: about 36 hours of Proton upload at the measured 0.65 s per file, plus 6 to 10 hours
+of Dropbox downloads at the 10-requests-per-second limit, around 45 hours in all.
 Each `task sync` behaves exactly like a chained Actions run: it stops on
 `RUN_BUDGET_MIN`, reports percent mirrored, and the next `task sync` picks up from R2, so
 the loop is just running it again until the report shows nothing remaining.
@@ -330,8 +331,8 @@ and rejects unknown keys.
 | `budget.listing_floor_ratio` | Refuse a listing smaller than this share of the mirrored file count. |
 | `reconcile.weekday` | UTC weekday (0 is Monday) whose first run does the Proton walk. |
 
-Environment, all read in `src/migrator/env.py`: the twelve names in `op.env` (secrets and
-the two R2 non-secrets); `RUN_BUDGET_MIN` and `RECONCILE=true` as run overrides;
+Environment, all read in `src/migrator/env.py`: the nine names in `op.env`;
+`RUN_BUDGET_MIN` and `RECONCILE=true` as run overrides;
 `MIRROR_VERBOSE=1` to print an error's full text instead of its class; `MIRROR_WORK_DIR`
 (default `.run`) and `MIRROR_CONFIG` (default `config/mirror.toml`). The non-secret
 `AWS_REGION` literal is an `ENV` line in the Dockerfile so every process in the toolbox
