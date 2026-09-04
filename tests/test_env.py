@@ -13,8 +13,9 @@ BASE = {
     "MIRROR_DROPBOX_APP_KEY": "k",
     "MIRROR_DROPBOX_APP_SECRET": "s",
     "MIRROR_DROPBOX_REFRESH_TOKEN": "r",
-    "RCLONE_CONFIG_DROPBOX_TOKEN": '{"access_token":"t"}',
-    "RCLONE_CONFIG_R2_SECRET_ACCESS_KEY": "r2s",
+    "AWS_ACCESS_KEY_ID": "ak",
+    "AWS_SECRET_ACCESS_KEY": "r2s",
+    "AWS_ENDPOINT_URL_S3": "https://accountid.r2.cloudflarestorage.com",
 }
 
 
@@ -30,7 +31,6 @@ def test_defaults_and_secrets():
         "https://hc/ping/x",
         "s",
         "r",
-        '{"access_token":"t"}',
         "r2s",
     }
 

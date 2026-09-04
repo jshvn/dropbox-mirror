@@ -39,10 +39,6 @@ class WorkPaths:
         return self.root / "logs"
 
     @property
-    def rclone_config(self) -> Path:
-        return self.root / "rclone.conf"
-
-    @property
     def report(self) -> Path:
         return self.root / "report.md"
 
@@ -65,4 +61,3 @@ class WorkPaths:
         ):
             directory.mkdir(parents=True, exist_ok=True)
         self.session.chmod(0o700)
-        self.rclone_config.touch(exist_ok=True)

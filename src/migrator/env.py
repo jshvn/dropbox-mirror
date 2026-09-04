@@ -31,8 +31,9 @@ class Runtime:
     dropbox_app_key: str
     dropbox_app_secret: str
     dropbox_refresh_token: str
-    rclone_dropbox_token: str
-    r2_secret: str
+    aws_access_key_id: str
+    aws_secret_access_key: str
+    aws_endpoint_url: str
     host: str
 
     @classmethod
@@ -52,8 +53,9 @@ class Runtime:
             dropbox_app_key=env.get("MIRROR_DROPBOX_APP_KEY", ""),
             dropbox_app_secret=env.get("MIRROR_DROPBOX_APP_SECRET", ""),
             dropbox_refresh_token=env.get("MIRROR_DROPBOX_REFRESH_TOKEN", ""),
-            rclone_dropbox_token=env.get("RCLONE_CONFIG_DROPBOX_TOKEN", ""),
-            r2_secret=env.get("RCLONE_CONFIG_R2_SECRET_ACCESS_KEY", ""),
+            aws_access_key_id=env.get("AWS_ACCESS_KEY_ID", ""),
+            aws_secret_access_key=env.get("AWS_SECRET_ACCESS_KEY", ""),
+            aws_endpoint_url=env.get("AWS_ENDPOINT_URL_S3", ""),
             host=f"github:{run_id}" if run_id else socket.gethostname(),
         )
 
@@ -63,7 +65,6 @@ class Runtime:
             self.healthcheck_url,
             self.dropbox_app_secret,
             self.dropbox_refresh_token,
-            self.rclone_dropbox_token,
-            self.r2_secret,
+            self.aws_secret_access_key,
         )
         return [value for value in values if value]

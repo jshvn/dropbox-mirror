@@ -50,12 +50,9 @@ jobs:
           MIRROR_DROPBOX_APP_KEY: op://n2njbgnjzkufe7ft6eq2g6bvay/dropbox/app_key
           MIRROR_DROPBOX_APP_SECRET: op://n2njbgnjzkufe7ft6eq2g6bvay/dropbox/app_secret
           MIRROR_DROPBOX_REFRESH_TOKEN: op://n2njbgnjzkufe7ft6eq2g6bvay/dropbox/refresh_token
-          RCLONE_CONFIG_DROPBOX_CLIENT_ID: op://n2njbgnjzkufe7ft6eq2g6bvay/dropbox/app_key
-          RCLONE_CONFIG_DROPBOX_CLIENT_SECRET: op://n2njbgnjzkufe7ft6eq2g6bvay/dropbox/app_secret
-          RCLONE_CONFIG_DROPBOX_TOKEN: op://n2njbgnjzkufe7ft6eq2g6bvay/dropbox/rclone_token
-          RCLONE_CONFIG_R2_ACCESS_KEY_ID: op://n2njbgnjzkufe7ft6eq2g6bvay/r2/access_key_id
-          RCLONE_CONFIG_R2_SECRET_ACCESS_KEY: op://n2njbgnjzkufe7ft6eq2g6bvay/r2/secret_access_key
-          RCLONE_CONFIG_R2_ENDPOINT: op://n2njbgnjzkufe7ft6eq2g6bvay/r2/endpoint
+          AWS_ACCESS_KEY_ID: op://n2njbgnjzkufe7ft6eq2g6bvay/r2/access_key_id
+          AWS_SECRET_ACCESS_KEY: op://n2njbgnjzkufe7ft6eq2g6bvay/r2/secret_access_key
+          AWS_ENDPOINT_URL_S3: op://n2njbgnjzkufe7ft6eq2g6bvay/r2/endpoint
           MIRROR_R2_BUCKET: op://n2njbgnjzkufe7ft6eq2g6bvay/r2/bucket
           MIRROR_AGE_IDENTITY: op://n2njbgnjzkufe7ft6eq2g6bvay/age/identity
           MIRROR_HEALTHCHECK_URL: op://n2njbgnjzkufe7ft6eq2g6bvay/healthcheck/url

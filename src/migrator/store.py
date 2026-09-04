@@ -1,14 +1,16 @@
 from __future__ import annotations
 
-import json
-import subprocess
-from collections.abc import Callable
 from pathlib import Path
+from typing import Any
+
+import boto3
+from botocore.config import Config
+from botocore.exceptions import ClientError
 
 from .env import Runtime
 from .paths import WorkPaths
 
-MISSING_EXITS = {3, 4}  # rclone: directory / file not found
+MISSING_CODES = {"NoSuchKey", "404"}
 
 
 class StoreError(RuntimeError):
@@ -16,94 +18,83 @@ class StoreError(RuntimeError):
 
 
 class Store:
-    """R2 object store through rclone's S3 backend, configured by RCLONE_CONFIG_R2_* env."""
+    """R2 object store through boto3's S3 client."""
 
     def __init__(
         self,
         runtime: Runtime,
         paths: WorkPaths,
         *,
-        run: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+        client: Any | None = None,
     ) -> None:
         if not runtime.r2_bucket:
             raise StoreError("required secret is unset: MIRROR_R2_BUCKET")
         self.bucket = runtime.r2_bucket
         self.paths = paths
-        self.run = run
+        self.client = client if client is not None else self._build_client(runtime)
 
-    def _remote(self, key: str) -> str:
-        return f"r2:{self.bucket}/{key}"
-
-    def _rclone(self, *args: str) -> subprocess.CompletedProcess[str]:
-        argv = [
-            "rclone",
-            *args,
-            "--config",
-            str(self.paths.rclone_config),
-            "--retries",
-            "5",
-        ]
-        try:
-            return self.run(
-                argv,
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                check=False,
-                timeout=900,
-            )
-        except subprocess.TimeoutExpired as exc:
-            raise StoreError(f"rclone {args[0]} timed out") from exc
+    @staticmethod
+    def _build_client(runtime: Runtime) -> Any:
+        if not runtime.aws_access_key_id:
+            raise StoreError("required secret is unset: AWS_ACCESS_KEY_ID")
+        if not runtime.aws_secret_access_key:
+            raise StoreError("required secret is unset: AWS_SECRET_ACCESS_KEY")
+        if not runtime.aws_endpoint_url:
+            raise StoreError("required secret is unset: AWS_ENDPOINT_URL_S3")
+        return boto3.client(
+            "s3",
+            endpoint_url=runtime.aws_endpoint_url,
+            region_name="auto",
+            aws_access_key_id=runtime.aws_access_key_id,
+            aws_secret_access_key=runtime.aws_secret_access_key,
+            # R2 rejects the SDK's default checksum headers.
+            config=Config(
+                request_checksum_calculation="when_required",
+                response_checksum_validation="when_required",
+                retries={"max_attempts": 5, "mode": "standard"},
+            ),
+        )
 
     def get(self, key: str, target: Path) -> bool:
         target.parent.mkdir(parents=True, exist_ok=True)
-        result = self._rclone("copyto", self._remote(key), str(target))
-        if result.returncode in MISSING_EXITS:
-            return False
-        if result.returncode:
-            raise StoreError(
-                f"rclone copyto from R2 failed with exit {result.returncode}"
-            )
-        # rclone exits 0 for an absent S3 object and writes nothing: the file on
-        # disk is the evidence, never the exit status.
-        return target.is_file()
+        try:
+            self.client.download_file(self.bucket, key, str(target))
+        except ClientError as exc:
+            if exc.response.get("Error", {}).get("Code") in MISSING_CODES:
+                return False
+            raise StoreError(f"R2 download failed: {exc}") from exc
+        return True
 
     def put(self, source: Path, key: str) -> None:
-        result = self._rclone("copyto", str(source), self._remote(key))
-        if result.returncode:
-            raise StoreError(
-                f"rclone copyto to R2 failed with exit {result.returncode}"
-            )
+        try:
+            self.client.upload_file(str(source), self.bucket, key)
+        except ClientError as exc:
+            raise StoreError(f"R2 upload failed: {exc}") from exc
 
     def copy(self, source_key: str, target_key: str) -> None:
-        result = self._rclone(
-            "copyto", self._remote(source_key), self._remote(target_key)
-        )
-        if result.returncode:
-            raise StoreError(
-                f"rclone server-side copy failed with exit {result.returncode}"
+        try:
+            self.client.copy_object(
+                Bucket=self.bucket,
+                CopySource={"Bucket": self.bucket, "Key": source_key},
+                Key=target_key,
             )
+        except ClientError as exc:
+            raise StoreError(f"R2 server-side copy failed: {exc}") from exc
 
     def list(self, prefix: str) -> list[str]:
-        result = self._rclone("lsjson", self._remote(prefix))
-        if result.returncode in MISSING_EXITS:
-            return []
-        if result.returncode:
-            raise StoreError(f"rclone lsjson failed with exit {result.returncode}")
+        keys: list[str] = []
         try:
-            entries = json.loads(result.stdout or "[]")
-        except ValueError as exc:
-            raise StoreError("rclone lsjson returned invalid JSON") from exc
-        return sorted(
-            prefix + str(entry["Path"]) for entry in entries if not entry.get("IsDir")
-        )
+            paginator = self.client.get_paginator("list_objects_v2")
+            for page in paginator.paginate(Bucket=self.bucket, Prefix=prefix):
+                keys.extend(entry["Key"] for entry in page.get("Contents", []))
+        except ClientError as exc:
+            raise StoreError(f"R2 listing failed: {exc}") from exc
+        return sorted(keys)
 
     def probe(self) -> None:
-        """Fail unless the bucket answers a listing. rclone reports a wrong bucket name or a
-        rejected credential with the same not-found exit as a missing key, and that must
-        never read as an empty mirror."""
-        result = self._rclone("lsjson", self._remote(""))
-        if result.returncode:
-            raise StoreError(
-                f"R2 bucket is not reachable: rclone exit {result.returncode}"
-            )
+        """Fail unless the bucket answers a listing. A wrong bucket name or a rejected
+        credential must never read as an empty mirror."""
+        try:
+            self.client.list_objects_v2(Bucket=self.bucket, MaxKeys=1)
+        except ClientError as exc:
+            raise StoreError(f"R2 bucket is not reachable: {exc}") from exc

@@ -9,7 +9,7 @@ description = "Nightly Dropbox to Proton Drive mirror run from GitHub Actions"
 requires-python = ">=3.13"
 license = "MIT"
 license-files = ["LICENSE"]
-dependencies = ["requests>=2.32,<3"]
+dependencies = ["requests>=2.32,<3", "boto3>=1.35,<2"]
 
 [project.optional-dependencies]
 test = ["pytest>=8.4,<9", "ruff>=0.16,<1"]
