@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from migrator import crypt, session
 from migrator.config import Budget, Config, Dropbox, Mirror, Proton, Rclone, Reconcile
 from migrator.env import Runtime
 from migrator.logging import RunLogger
@@ -85,3 +86,48 @@ def state_context(tmp_path, config_factory, runtime_factory):
         yield cfg, paths, state, logger, runtime
     finally:
         state.close()
+
+
+class FakeStore:
+    """In-memory stand-in for migrator.store.Store."""
+
+    def __init__(self):
+        self.objects: dict[str, bytes] = {}
+
+    def get(self, key, target: Path) -> bool:
+        if key not in self.objects:
+            return False
+        target.write_bytes(self.objects[key])
+        return True
+
+    def put(self, source: Path, key) -> None:
+        self.objects[key] = source.read_bytes()
+
+    def copy(self, s, t):
+        self.objects[t] = self.objects[s]
+
+    def list(self, prefix):
+        return sorted(k for k in self.objects if k.startswith(prefix))
+
+    def probe(self):
+        pass
+
+
+@pytest.fixture
+def plain_crypt(monkeypatch):
+    # age is exercised in the image build; here encryption is identity so tar bytes are inspectable.
+    monkeypatch.setattr(
+        crypt,
+        "encrypt",
+        lambda identity, key_file, source, target, run=None: target.write_bytes(
+            source.read_bytes()
+        ),
+    )
+    monkeypatch.setattr(
+        crypt,
+        "decrypt",
+        lambda identity, key_file, source, target, run=None: target.write_bytes(
+            source.read_bytes()
+        ),
+    )
+    monkeypatch.setattr(session, "_last_digest", None)
