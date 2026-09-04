@@ -8,7 +8,7 @@ from .config import load_config
 from .env import Runtime
 from .logging import RunLogger
 from .paths import WorkPaths
-from .phases import p10_inventory
+from .phases import p10_inventory, p30_plan
 from .phases.base import PhaseContext, PhaseError, PhaseResult
 from .state import State
 
@@ -23,6 +23,7 @@ class PhaseDefinition:
 
 PHASES: dict[str, PhaseDefinition] = {
     "inventory": PhaseDefinition(10, "inventory", "10_inventory", p10_inventory.run),
+    "plan": PhaseDefinition(30, "plan", "30_plan", p30_plan.run),
 }
 
 
