@@ -1,0 +1,11 @@
+{
+  "account_id": "dbid:synthetic-account",
+  "name": {
+    "display_name": "Synthetic Qualification"
+  },
+  "root_info": {
+    ".tag": "user",
+    "home_namespace_id": "synthetic-home",
+    "root_namespace_id": "synthetic-root"
+  }
+}

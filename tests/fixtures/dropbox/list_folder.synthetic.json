@@ -1,0 +1,19 @@
+{
+  "cursor": "synthetic-cursor",
+  "entries": [
+    {
+      ".tag": "file",
+      "client_modified": "2026-01-01T00:00:00Z",
+      "content_hash": "a95c21c9922fb77a0fb1c4e014bd7fba34fc4fceda49b17d9d3e25b1b4b0c013",
+      "id": "id:synthetic-file",
+      "is_downloadable": true,
+      "name": "example.txt",
+      "path_display": "/example.txt",
+      "path_lower": "/example.txt",
+      "rev": "synthetic-revision",
+      "server_modified": "2026-01-01T00:00:01Z",
+      "size": 7
+    }
+  ],
+  "has_more": false
+}
