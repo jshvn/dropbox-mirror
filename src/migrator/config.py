@@ -111,6 +111,7 @@ class Dropbox:
     expected_account_id: str
     root: str = ""
     api_base_url: str = "https://api.dropboxapi.com/2"
+    content_base_url: str = "https://content.dropboxapi.com/2"
     token_url: str = "https://api.dropboxapi.com/oauth2/token"
     timeout_seconds: float = 180
     page_limit: int = 2000
@@ -118,19 +119,7 @@ class Dropbox:
     max_attempts: int = 12
     initial_backoff_seconds: float = 2
     maximum_backoff_seconds: float = 300
-
-
-@dataclass(frozen=True)
-class Rclone:
-    remote: str = "dropbox"
-    executable: str = "rclone"
-    tps_limit: float = 10
-    tps_burst: int = 1
-    transfers: int = 4
-    retries: int = 8
-    low_level_retries: int = 20
-    list_timeout_seconds: float = 300
-    transfer_timeout_seconds: float = 3600
+    download_workers: int = 4
 
 
 @dataclass(frozen=True)
@@ -177,7 +166,6 @@ class Reconcile:
 class Config:
     mirror: Mirror
     dropbox: Dropbox
-    rclone: Rclone
     proton: Proton
     budget: Budget
     reconcile: Reconcile
@@ -186,7 +174,7 @@ class Config:
 
 
 _MIRROR_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
-SECTIONS = {"mirror", "dropbox", "rclone", "proton", "budget", "reconcile"}
+SECTIONS = {"mirror", "dropbox", "proton", "budget", "reconcile"}
 
 
 def load_config(path: str | Path) -> Config:
@@ -204,7 +192,6 @@ def load_config(path: str | Path) -> Config:
     cfg = Config(
         mirror=_section(Mirror, data.get("mirror", {}), base, "mirror"),
         dropbox=_section(Dropbox, data.get("dropbox", {}), base, "dropbox"),
-        rclone=_section(Rclone, data.get("rclone", {}), base, "rclone"),
         proton=_section(Proton, data.get("proton", {}), base, "proton"),
         budget=_section(Budget, data.get("budget", {}), base, "budget"),
         reconcile=_section(Reconcile, data.get("reconcile", {}), base, "reconcile"),
@@ -224,10 +211,7 @@ def validate_config(cfg: Config) -> None:
         raise ConfigError(
             "proton.expected_destination_uid must be at least 8 characters"
         )
-    if not cfg.rclone.remote or ":" in cfg.rclone.remote:
-        raise ConfigError("rclone.remote must be a bare remote name")
     try:
-        validate_executable(cfg.rclone.executable, label="rclone.executable")
         validate_executable(cfg.proton.executable, label="proton.executable")
         validate_dropbox_scope(cfg.dropbox.root)
         validate_proton_cli_path(cfg.proton.destination, label="proton.destination")
@@ -246,11 +230,7 @@ def validate_config(cfg: Config) -> None:
     _positive_int(cfg.dropbox.max_attempts, "dropbox.max_attempts")
     _nonnegative(cfg.dropbox.initial_backoff_seconds, "dropbox.initial_backoff_seconds")
     _positive(cfg.dropbox.maximum_backoff_seconds, "dropbox.maximum_backoff_seconds")
-    _positive(cfg.rclone.tps_limit, "rclone.tps_limit")
-    for name in ("tps_burst", "transfers", "retries", "low_level_retries"):
-        _positive_int(getattr(cfg.rclone, name), f"rclone.{name}")
-    _positive(cfg.rclone.list_timeout_seconds, "rclone.list_timeout_seconds")
-    _positive(cfg.rclone.transfer_timeout_seconds, "rclone.transfer_timeout_seconds")
+    _positive_int(cfg.dropbox.download_workers, "dropbox.download_workers")
     _positive_int(cfg.proton.list_max_attempts, "proton.list_max_attempts")
     _positive_int(cfg.proton.download_max_attempts, "proton.download_max_attempts")
     _nonnegative(cfg.proton.initial_backoff_seconds, "proton.initial_backoff_seconds")

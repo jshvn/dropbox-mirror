@@ -5,10 +5,11 @@ from pathlib import Path
 import pytest
 
 from migrator import crypt, session
-from migrator.config import Budget, Config, Dropbox, Mirror, Proton, Rclone, Reconcile
+from migrator.config import Budget, Config, Dropbox, Mirror, Proton, Reconcile
 from migrator.env import Runtime
 from migrator.logging import RunLogger
 from migrator.paths import WorkPaths
+from migrator.providers.dropbox_api import DropboxNotFound
 from migrator.providers.proton_cli import ProtonCLIError
 from migrator.state import State
 
@@ -19,8 +20,9 @@ TEST_ENV = {
     "MIRROR_DROPBOX_APP_KEY": "app-key",
     "MIRROR_DROPBOX_APP_SECRET": "app-secret",
     "MIRROR_DROPBOX_REFRESH_TOKEN": "refresh-token",
-    "RCLONE_CONFIG_DROPBOX_TOKEN": '{"access_token":"rclone-token"}',
-    "RCLONE_CONFIG_R2_SECRET_ACCESS_KEY": "r2-secret",
+    "AWS_ACCESS_KEY_ID": "test-access-key",
+    "AWS_SECRET_ACCESS_KEY": "test-secret-key",
+    "AWS_ENDPOINT_URL_S3": "https://s3.example",
 }
 
 
@@ -55,7 +57,6 @@ def config_factory():
                     initial_backoff_seconds=0,
                 ),
             ),
-            rclone=overrides.get("rclone", Rclone(retries=2)),
             proton=overrides.get(
                 "proton",
                 Proton(
@@ -112,6 +113,23 @@ class FakeStore:
 
     def probe(self):
         pass
+
+
+class FakeDropbox:
+    """Stand-in for DropboxAPIProvider.download: canned bytes keyed by path_lower."""
+
+    def __init__(self, files: dict[str, bytes], missing=()):
+        self.files = {k.lower(): v for k, v in files.items()}
+        self.missing = {m.lower() for m in missing}
+        self.downloaded: list[str] = []
+
+    def download(self, path_lower: str, target: Path) -> None:
+        self.downloaded.append(path_lower)
+        key = path_lower.lower()
+        if key in self.missing:
+            raise DropboxNotFound(path_lower)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(self.files[key])
 
 
 @pytest.fixture

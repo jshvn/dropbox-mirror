@@ -35,7 +35,10 @@ def _batch_details(ctx: PhaseContext) -> list[dict[str, Any]]:
 
 
 def _throttling(
-    ctx: PhaseContext, provider_phase_like: str, command_provider: str, since: str
+    ctx: PhaseContext,
+    provider_phase_like: str,
+    command_provider: str | None,
+    since: str,
 ) -> dict[str, float]:
     """This run only: `since` is runs.started_at, and the evidence tables carry no run id,
     so `commands.started_at` is compared directly."""
@@ -48,12 +51,14 @@ def _throttling(
             (provider_phase_like, since),
         )
     ]
-    commands = int(
-        connection.execute(
-            "SELECT COUNT(*) FROM commands WHERE provider=? AND response_category='RATE_LIMIT' AND started_at >= ?",
-            (command_provider, since),
-        ).fetchone()[0]
-    )
+    commands = 0
+    if command_provider is not None:
+        commands = int(
+            connection.execute(
+                "SELECT COUNT(*) FROM commands WHERE provider=? AND response_category='RATE_LIMIT' AND started_at >= ?",
+                (command_provider, since),
+            ).fetchone()[0]
+        )
     return {
         "rate_limited": len(waits) + commands,
         "wait_seconds": round(sum(waits), 1),
@@ -184,7 +189,7 @@ def figures(ctx: PhaseContext) -> dict[str, Any]:
             "batch_seconds_max": durations[-1] if durations else 0,
         },
         "throttling": {
-            "dropbox": _throttling(ctx, "files/%", "rclone", since),
+            "dropbox": _throttling(ctx, "files/%", None, since),
             "proton": _throttling(ctx, "proton%", "proton", since),
         },
         "errors": errors,

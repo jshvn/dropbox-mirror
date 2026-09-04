@@ -6,7 +6,8 @@ from collections import Counter
 
 from .. import session
 from ..logging import utc_now
-from ..providers.dropbox_rclone import DropboxRcloneProvider
+from ..providers.dropbox_api import DropboxAPIProvider
+from ..providers.dropbox_auth import access_token
 from ..providers.proton_cli import ProtonCLIProvider
 from ..store import Store
 from . import batch
@@ -39,7 +40,9 @@ def run(ctx: PhaseContext) -> PhaseResult:
         ctx.logger,
         after_call=lambda: session.writeback(ctx.runtime, ctx.paths, store),
     )
-    rclone = DropboxRcloneProvider(ctx.cfg, ctx.paths, ctx.state, ctx.logger)
+    token = access_token(ctx.cfg, ctx.runtime)
+    ctx.logger.add_secret(token)
+    dropbox = DropboxAPIProvider(ctx.cfg, ctx.state, ctx.logger, token=token)
     # Unconditional: the one Proton call a quiet night is guaranteed to make. It forces any
     # pending token rotation (after_call writes the session back) and keeps the 60-day
     # idle expiry away, besides gating on the destination UID.
@@ -67,7 +70,7 @@ def run(ctx: PhaseContext) -> PhaseResult:
                 "UPDATE batches SET started_at=? WHERE id=?", (utc_now(), batch_id)
             )
         steps = (
-            ("fetch", lambda bid=batch_id: batch.fetch(ctx, rclone, bid)),
+            ("fetch", lambda bid=batch_id: batch.fetch(ctx, dropbox, bid)),
             ("verify", lambda bid=batch_id: batch.verify(ctx, bid)),
             ("upload", lambda bid=batch_id: batch.upload(ctx, proton, bid)),
             ("confirm", lambda bid=batch_id: batch.confirm(ctx, proton, bid)),

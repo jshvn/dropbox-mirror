@@ -1,24 +1,34 @@
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 
 import pytest
 import requests
 
 from migrator.logging import RunLogger
-from migrator.providers.dropbox_api import DropboxAPIError, DropboxAPIProvider
+from migrator.providers.dropbox_api import (
+    DropboxAPIError,
+    DropboxAPIProvider,
+    DropboxNotFound,
+)
 from migrator.state import State
 
 
 class Response:
-    def __init__(self, status, payload=None, text="", headers=None):
+    def __init__(self, status, payload=None, text="", headers=None, content=b""):
         self.status_code = status
         self._payload = payload
         self.text = text
         self.headers = headers or {}
+        self._content = content
 
     def json(self):
         return self._payload
+
+    def iter_content(self, chunk_size):
+        for offset in range(0, len(self._content), chunk_size):
+            yield self._content[offset : offset + chunk_size]
 
 
 class Session:
@@ -138,3 +148,51 @@ def test_interrupted_inventory_resumes_from_committed_cursor(tmp_path, config_fa
     assert count == 2
     assert second_session.urls[-1].endswith("/files/list_folder/continue")
     state.close()
+
+
+def test_download_writes_the_response_body_to_the_target(state_context, tmp_path):
+    cfg, _paths, state, logger, _runtime = state_context
+    session = Session([Response(200, content=b"hello world")])
+    provider = DropboxAPIProvider(
+        cfg, state, logger, token="test-token", session=session, sleep=lambda _: None
+    )
+    target = tmp_path / "out" / "a.txt"
+    provider.download("/a.txt", target)
+    assert target.read_bytes() == b"hello world"
+    assert not target.with_name("a.txt.part").exists()
+    assert session.urls[-1].endswith("/files/download")
+
+
+def test_download_raises_not_found_for_a_missing_path(state_context, tmp_path):
+    cfg, _paths, state, logger, _runtime = state_context
+    body = {
+        "error_summary": "path/not_found/",
+        "error": {".tag": "path", "path": {".tag": "not_found"}},
+    }
+    session = Session([Response(409, body, text=json.dumps(body))])
+    provider = DropboxAPIProvider(
+        cfg, state, logger, token="test-token", session=session, sleep=lambda _: None
+    )
+    with pytest.raises(DropboxNotFound):
+        provider.download("/gone.txt", tmp_path / "gone.txt")
+
+
+def test_download_retries_429_then_succeeds(state_context, tmp_path):
+    cfg, _paths, state, logger, _runtime = state_context
+    cfg = replace(
+        cfg, dropbox=replace(cfg.dropbox, max_attempts=3, initial_backoff_seconds=1)
+    )
+    session = Session(
+        [
+            Response(429, text="limited", headers={"Retry-After": "5"}),
+            Response(200, content=b"payload"),
+        ]
+    )
+    sleeps = []
+    provider = DropboxAPIProvider(
+        cfg, state, logger, token="test-token", session=session, sleep=sleeps.append
+    )
+    target = tmp_path / "a.txt"
+    provider.download("/a.txt", target)
+    assert target.read_bytes() == b"payload"
+    assert sleeps == [5.0]

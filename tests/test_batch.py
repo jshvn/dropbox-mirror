@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 
 import pytest
-from conftest import FakeProton, FakeStore, proton_node
+from conftest import FakeDropbox, FakeProton, FakeStore, proton_node
 
 from migrator.hashing import hash_file
 from migrator.phases import batch
@@ -58,40 +58,16 @@ def _batch(ctx, files: dict[str, bytes]) -> int:
     return batch_id
 
 
-class FakeRclone:
-    """Writes the listed files at their lowercase paths, like rclone copying by path_lower."""
-
-    def __init__(self, source: dict[str, bytes], missing=()):
-        self.source = {k.lower(): v for k, v in source.items()}
-        self.missing = {m.lower() for m in missing}
-        self.lists = []
-
-    def copy_files_from(self, list_file: Path, target: Path, log_path: Path) -> int:
-        names = list_file.read_text(encoding="utf-8").splitlines()
-        self.lists.append(names)
-        code = 0
-        for name in names:
-            key = "/" + name
-            if key in self.missing:
-                code = 4
-                continue
-            path = target / name
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(self.source[key])
-        log_path.write_text("", encoding="utf-8")
-        return code
-
-
-def test_fetch_moves_files_to_display_paths_and_marks_vanished(state_context):
+def test_fetch_downloads_to_path_lower_and_marks_vanished(state_context):
     ctx = _ctx(state_context)
     files = {"/Docs/Réport.txt": b"report", "/Docs/gone.txt": b"x"}
     batch_id = _batch(ctx, files)
-    rclone = FakeRclone(files, missing=["/Docs/gone.txt"])
-    counts = batch.fetch(ctx, rclone, batch_id)
+    dropbox = FakeDropbox(files, missing=["/Docs/gone.txt"])
+    counts = batch.fetch(ctx, dropbox, batch_id)
     assert counts == {"fetched": 1, "vanished": 1}
-    assert rclone.lists == [["docs/gone.txt", "docs/réport.txt"]]
-    assert (ctx.paths.staging / "Docs" / "Réport.txt").read_bytes() == b"report"
-    assert not (ctx.paths.staging / "docs").exists()
+    assert sorted(dropbox.downloaded) == ["/docs/gone.txt", "/docs/réport.txt"]
+    assert (ctx.paths.staging / "docs" / "réport.txt").read_bytes() == b"report"
+    assert not (ctx.paths.staging / "docs" / "gone.txt").exists()
     statuses = {r["path_lower"]: r["status"] for r in batch.items(ctx, batch_id)}
     assert statuses == {"/docs/réport.txt": "FETCHED", "/docs/gone.txt": "VANISHED"}
 
@@ -100,19 +76,36 @@ def test_fetch_refuses_to_rerun_once_items_have_advanced(state_context):
     ctx = _ctx(state_context)
     files = {"/a.txt": b"hello"}
     batch_id = _batch(ctx, files)
-    batch.fetch(ctx, FakeRclone(files), batch_id)
+    batch.fetch(ctx, FakeDropbox(files), batch_id)
     batch.verify(ctx, batch_id)
     with pytest.raises(PhaseError, match="past fetch"):
-        batch.fetch(ctx, FakeRclone(files), batch_id)
+        batch.fetch(ctx, FakeDropbox(files), batch_id)
     assert (ctx.paths.staging / "a.txt").read_bytes() == b"hello"
+
+
+def test_fetch_reraises_after_the_pool_drains_on_a_download_error(state_context):
+    ctx = _ctx(state_context)
+    files = {"/a.txt": b"hello", "/b.txt": b"world"}
+    batch_id = _batch(ctx, files)
+
+    class FlakyDropbox(FakeDropbox):
+        def download(self, path_lower: str, target: Path) -> None:
+            if path_lower == "/b.txt":
+                raise RuntimeError("boom")
+            super().download(path_lower, target)
+
+    with pytest.raises(RuntimeError, match="boom"):
+        batch.fetch(ctx, FlakyDropbox(files), batch_id)
+    statuses = {r["path_lower"]: r["status"] for r in batch.items(ctx, batch_id)}
+    assert statuses == {"/a.txt": "FETCHED", "/b.txt": "PLANNED"}
 
 
 def test_verify_records_hashes_and_skips_a_mismatch(state_context):
     ctx = _ctx(state_context)
     files = {"/a.txt": b"hello", "/Docs/b.txt": b"world"}
     batch_id = _batch(ctx, files)
-    batch.fetch(ctx, FakeRclone(files), batch_id)
-    (ctx.paths.staging / "Docs" / "b.txt").write_bytes(b"edited mid-run")
+    batch.fetch(ctx, FakeDropbox(files), batch_id)
+    (ctx.paths.staging / "docs" / "b.txt").write_bytes(b"edited mid-run")
     counts = batch.verify(ctx, batch_id)
     assert counts == {"verified": 1, "bytes": 5, "hash_mismatch": 1}
     rows = {r["path_lower"]: r for r in batch.items(ctx, batch_id)}
@@ -122,14 +115,14 @@ def test_verify_records_hashes_and_skips_a_mismatch(state_context):
     )
     assert rows["/docs/b.txt"]["status"] == "HASH_MISMATCH"
     assert not (
-        ctx.paths.staging / "Docs"
+        ctx.paths.staging / "docs"
     ).exists()  # wrong bytes never reach the upload
 
 
 def test_verify_fails_batch_when_every_file_mismatches(state_context):
     ctx = _ctx(state_context)
     batch_id = _batch(ctx, {"/a.txt": b"hello"})
-    batch.fetch(ctx, FakeRclone({"/a.txt": b"hello"}), batch_id)
+    batch.fetch(ctx, FakeDropbox({"/a.txt": b"hello"}), batch_id)
     (ctx.paths.staging / "a.txt").write_bytes(b"tampered")
     with pytest.raises(PhaseError, match="content hash"):
         batch.verify(ctx, batch_id)
@@ -138,7 +131,7 @@ def test_verify_fails_batch_when_every_file_mismatches(state_context):
 def test_upload_passes_top_level_children(state_context):
     ctx = _ctx(state_context)
     batch_id = _batch(ctx, {"/Docs/a.txt": b"aa", "/b.txt": b"b"})
-    batch.fetch(ctx, FakeRclone({"/Docs/a.txt": b"aa", "/b.txt": b"b"}), batch_id)
+    batch.fetch(ctx, FakeDropbox({"/Docs/a.txt": b"aa", "/b.txt": b"b"}), batch_id)
     batch.verify(ctx, batch_id)
     proton = FakeProton({}, {})
     assert batch.upload(ctx, proton, batch_id) == {
@@ -147,8 +140,8 @@ def test_upload_passes_top_level_children(state_context):
     }
     sources, destination = proton.uploads[0]
     assert sources == [
-        str(ctx.paths.staging / "Docs"),
         str(ctx.paths.staging / "b.txt"),
+        str(ctx.paths.staging / "docs"),
     ]
     assert destination == "/my-files/Dropbox"
 
@@ -157,7 +150,7 @@ def test_upload_stores_the_cli_report_as_an_artifact(state_context):
     ctx = _ctx(state_context)
     files = {"/a.txt": b"aa"}
     batch_id = _batch(ctx, files)
-    batch.fetch(ctx, FakeRclone(files), batch_id)
+    batch.fetch(ctx, FakeDropbox(files), batch_id)
     batch.verify(ctx, batch_id)
     batch.upload(ctx, FakeProton({}, {}), batch_id)
     report = ctx.phase_dir("40_batches") / f"upload-{batch_id}.json"
@@ -174,7 +167,7 @@ def test_confirm_matches_name_size_sha1_and_records_uid(state_context):
     ctx = _ctx(state_context)
     files = {"/Docs/a.txt": b"aa", "/Docs/bad.txt": b"bb", "/Docs/missing.txt": b"cc"}
     batch_id = _batch(ctx, files)
-    batch.fetch(ctx, FakeRclone(files), batch_id)
+    batch.fetch(ctx, FakeDropbox(files), batch_id)
     batch.verify(ctx, batch_id)
     sha_a = hashlib.sha1(b"aa").hexdigest()
     proton = FakeProton(
@@ -201,7 +194,7 @@ def test_confirm_uses_uid_path_for_duplicate_names_and_listing_failure(state_con
     ctx = _ctx(state_context)
     files = {"/D/x.txt": b"x", "/E/y.txt": b"y"}
     batch_id = _batch(ctx, files)
-    batch.fetch(ctx, FakeRclone(files), batch_id)
+    batch.fetch(ctx, FakeDropbox(files), batch_id)
     batch.verify(ctx, batch_id)
     sha_x = hashlib.sha1(b"x").hexdigest()
     proton = FakeProton(
@@ -229,7 +222,7 @@ def test_roundtrip_compares_bytes(state_context, monkeypatch):
     ctx = _ctx(state_context)
     files = {"/a.txt": b"same", "/b.txt": b"orig"}
     batch_id = _batch(ctx, files)
-    batch.fetch(ctx, FakeRclone(files), batch_id)
+    batch.fetch(ctx, FakeDropbox(files), batch_id)
     batch.verify(ctx, batch_id)
     proton = FakeProton(
         {
@@ -263,7 +256,7 @@ def test_roundtrip_defers_the_rest_when_the_run_budget_runs_out(
     ctx = _ctx(state_context)
     files = {"/a.txt": b"one", "/b.txt": b"two"}
     batch_id = _batch(ctx, files)
-    batch.fetch(ctx, FakeRclone(files), batch_id)
+    batch.fetch(ctx, FakeDropbox(files), batch_id)
     batch.verify(ctx, batch_id)
     proton = FakeProton(
         {
@@ -302,7 +295,7 @@ def test_checkpoint_merges_only_verified_rows_and_pushes(state_context, plain_cr
     ctx = _ctx(state_context)
     files = {"/a.txt": b"same", "/b.txt": b"orig"}
     batch_id = _batch(ctx, files)
-    batch.fetch(ctx, FakeRclone(files), batch_id)
+    batch.fetch(ctx, FakeDropbox(files), batch_id)
     batch.verify(ctx, batch_id)
     proton = FakeProton(
         {

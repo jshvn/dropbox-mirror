@@ -8,12 +8,6 @@ root = ""
 page_limit = 2000
 minimum_call_interval_seconds = 0.1
 
-[rclone]
-remote = "dropbox"
-tps_limit = 10
-tps_burst = 1
-transfers = 4
-
 [proton]
 destination = "/my-files/Dropbox"
 expected_destination_uid = "JG4skepsXf6_Nf3Nq9wCXskuwJ_P3SvU-gNQ-rcIs5AHh26CkLOIp_ldF1tqcQACNfBDf6gefBWlqx3_C--e6w==~9adM7wIv95xzYRt5q1mJMuIiOz8koFpYd9HzHeumL1nof1Urt886RX8r1V4A240yrWluyEGBXqnrZ-zel-2TFQ=="

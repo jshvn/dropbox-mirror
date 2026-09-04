@@ -22,7 +22,8 @@ def _write(tmp_path, text):
 
 def test_defaults_and_derived_bytes(tmp_path):
     cfg = load_config(_write(tmp_path, GOOD))
-    assert cfg.rclone.tps_limit == 10
+    assert cfg.dropbox.content_base_url == "https://content.dropboxapi.com/2"
+    assert cfg.dropbox.download_workers == 4
     assert cfg.budget.batch_gb == 4
     assert cfg.budget.batch_files == 1000
     assert cfg.budget.batch_bytes == 4 * 1024**3

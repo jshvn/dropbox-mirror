@@ -7,6 +7,7 @@ import shutil
 import sqlite3
 import time
 from collections import Counter, defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -14,6 +15,7 @@ from .. import statefile
 from ..filesystem import walk_tree
 from ..hashing import hash_file
 from ..logging import utc_now
+from ..providers.dropbox_api import DropboxNotFound
 from ..providers.proton_cli import (
     ProtonCLIError,
     child_cli_path,
@@ -60,8 +62,8 @@ def _details(reason: str, **extra: Any) -> str:
     return json.dumps({"reason": reason, **extra}, sort_keys=True)
 
 
-def local_path(paths: Any, path_display: str) -> Path:
-    return paths.staging / path_display.lstrip("/")
+def local_path(paths: Any, path_lower: str) -> Path:
+    return paths.staging / path_lower.lstrip("/")
 
 
 def parent_cli_path(destination: str, path_display: str) -> str:
@@ -108,12 +110,12 @@ def resolve_children(
     return dict(by_name)
 
 
-def fetch(ctx: PhaseContext, rclone: Any, batch_id: int) -> dict[str, int]:
-    """rclone copies by path_lower (Dropbox's own spelling, so the match is exact);
-    each file is then moved to its NFC display path. Fetch owns staging outright: once
-    any item in the batch has moved past fetch's own PLANNED/VANISHED states, a second
-    call would wipe staging out from under files verify/upload already depend on, so it
-    refuses to run rather than silently losing them."""
+def fetch(ctx: PhaseContext, dropbox: Any, batch_id: int) -> dict[str, int]:
+    """One Dropbox API call per file, run through a thread pool; each lands at its
+    path_lower under staging. Fetch owns staging outright: once any item in the batch
+    has moved past fetch's own PLANNED/VANISHED states, a second call would wipe staging
+    out from under files verify/upload already depend on, so it refuses to run rather
+    than silently losing them."""
     advanced = [
         r for r in items(ctx, batch_id) if r["status"] not in ("PLANNED", "VANISHED")
     ]
@@ -124,52 +126,37 @@ def fetch(ctx: PhaseContext, rclone: Any, batch_id: int) -> dict[str, int]:
         )
     _clear(ctx.paths.staging)
     rows = items(ctx, batch_id, "PLANNED")
-    list_file = ctx.paths.root / "files-from.txt"
-    list_file.write_text(
-        "".join(str(r["path_lower"]).lstrip("/") + "\n" for r in rows), encoding="utf-8"
-    )
-    log_path = ctx.phase_dir(PHASE) / f"rclone-copy-{batch_id}.jsonl"
-    code = rclone.copy_files_from(list_file, ctx.paths.staging, log_path)
-    counts: Counter[str] = Counter()
-    for row in rows:
-        target = local_path(ctx.paths, str(row["path_display"]))
-        # rclone names the copy after the listed path, which is path_lower; a backend that
-        # answers with display casing is not ruled out, so either spelling is accepted.
-        source = next(
-            (
-                p
-                for p in (
-                    ctx.paths.staging / str(row["path_lower"]).lstrip("/"),
-                    target,
-                )
-                if p.is_file()
-            ),
-            None,
-        )
-        if source is None:
-            _set_item(
-                ctx,
-                batch_id,
-                row["path_lower"],
-                "VANISHED",
-                details_json=_details("vanished"),
-            )
-            counts["vanished"] += 1
-            continue
+
+    def _download(row: sqlite3.Row) -> None:
+        target = local_path(ctx.paths, str(row["path_lower"]))
         target.parent.mkdir(parents=True, exist_ok=True)
-        if source != target:
-            os.replace(source, target)
-        _set_item(ctx, batch_id, row["path_lower"], "FETCHED")
-        counts["fetched"] += 1
-    if rows and counts["vanished"] == len(rows) and code == 0:
-        # rclone copied everything, yet nothing is where the listing said: the staging
-        # layout and path_lower disagree. Silent as VANISHED, this would checkpoint an
-        # empty batch as success and never mirror a byte.
-        raise PhaseError(
-            "rclone exited 0 but no listed file reached staging under its listed name"
-        )
+        dropbox.download(str(row["path_lower"]), target)
+
+    counts: Counter[str] = Counter()
+    error: BaseException | None = None
+    with ThreadPoolExecutor(max_workers=ctx.cfg.dropbox.download_workers) as pool:
+        futures = [(row, pool.submit(_download, row)) for row in rows]
+        for row, future in futures:
+            try:
+                future.result()
+            except DropboxNotFound:
+                _set_item(
+                    ctx,
+                    batch_id,
+                    row["path_lower"],
+                    "VANISHED",
+                    details_json=_details("vanished"),
+                )
+                counts["vanished"] += 1
+            except Exception as exc:  # noqa: BLE001 - pool drains fully; batch fails after
+                if error is None:
+                    error = exc
+            else:
+                _set_item(ctx, batch_id, row["path_lower"], "FETCHED")
+                counts["fetched"] += 1
+    if error is not None:
+        raise error
     _prune_empty_dirs(ctx.paths.staging)
-    list_file.unlink(missing_ok=True)
     ctx.logger.info(PHASE, "fetch", "batch fetched", batch=batch_id, **counts)
     return {"fetched": counts["fetched"], "vanished": counts["vanished"]}
 
@@ -181,7 +168,7 @@ def verify(ctx: PhaseContext, batch_id: int) -> dict[str, int]:
     counts: Counter[str] = Counter()
     rows = items(ctx, batch_id, "FETCHED")
     for row in rows:
-        staged = local_path(ctx.paths, str(row["path_display"]))
+        staged = local_path(ctx.paths, str(row["path_lower"]))
         hashes = hash_file(staged)
         if hashes.size != int(row["size"]) or hashes.dropbox_content_hash != str(
             row["content_hash"]

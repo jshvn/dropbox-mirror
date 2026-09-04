@@ -160,54 +160,6 @@ CREATE TABLE IF NOT EXISTS dropbox_objects (
 CREATE INDEX IF NOT EXISTS idx_dropbox_objects_compare
 ON dropbox_objects(inventory_id, comparison_key);
 
-CREATE TABLE IF NOT EXISTS rclone_inventory_runs (
-    id INTEGER PRIMARY KEY,
-    started_at TEXT NOT NULL,
-    completed_at TEXT,
-    status TEXT NOT NULL,
-    remote TEXT NOT NULL,
-    root TEXT NOT NULL,
-    version TEXT NOT NULL,
-    purpose TEXT NOT NULL DEFAULT 'baseline'
-);
-
-CREATE TABLE IF NOT EXISTS rclone_folders (
-    inventory_id INTEGER NOT NULL REFERENCES rclone_inventory_runs(id),
-    path TEXT NOT NULL,
-    status TEXT NOT NULL,
-    attempt_count INTEGER NOT NULL DEFAULT 0,
-    last_error_category TEXT,
-    PRIMARY KEY(inventory_id, path)
-);
-
-CREATE TABLE IF NOT EXISTS rclone_objects (
-    inventory_id INTEGER NOT NULL REFERENCES rclone_inventory_runs(id),
-    object_key TEXT NOT NULL,
-    path TEXT NOT NULL,
-    comparison_key TEXT NOT NULL,
-    name TEXT NOT NULL,
-    is_dir INTEGER NOT NULL,
-    size INTEGER,
-    object_id TEXT,
-    dropbox_hash TEXT,
-    modtime TEXT,
-    raw_json TEXT NOT NULL,
-    PRIMARY KEY(inventory_id, object_key)
-);
-CREATE INDEX IF NOT EXISTS idx_rclone_objects_compare
-ON rclone_objects(inventory_id, comparison_key);
-
-CREATE TABLE IF NOT EXISTS source_reconciliation (
-    api_inventory_id INTEGER NOT NULL,
-    rclone_inventory_id INTEGER NOT NULL,
-    comparison_key TEXT NOT NULL,
-    api_object_key TEXT,
-    rclone_object_key TEXT,
-    classification TEXT NOT NULL,
-    details_json TEXT NOT NULL,
-    PRIMARY KEY(api_inventory_id, rclone_inventory_id, comparison_key)
-);
-
 CREATE TABLE IF NOT EXISTS proton_snapshots (
     id INTEGER PRIMARY KEY,
     purpose TEXT NOT NULL,
@@ -664,7 +616,6 @@ class State:
     ) -> int:
         allowed = {
             "dropbox_inventory_runs",
-            "rclone_inventory_runs",
             "proton_snapshots",
         }
         if table not in allowed:

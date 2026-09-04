@@ -2,21 +2,30 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import requests
 
-from ..config import Config
+from ..config import Config, Dropbox
 from ..filesystem import comparison_key
 from ..guards import dropbox_api_scope
 from ..logging import RunLogger, utc_now
 from ..state import State
 
+DOWNLOAD_CHUNK_SIZE = 1024 * 1024
+
 
 class DropboxAPIError(RuntimeError):
+    pass
+
+
+class DropboxNotFound(DropboxAPIError):
     pass
 
 
@@ -45,6 +54,14 @@ class DropboxAPIProvider:
         self.session = session or requests.Session()
         self.sleep = sleep
         self.token = token
+        self._rate_lock = threading.Lock()
+
+    def _throttle(self) -> None:
+        """Serializes the pacing sleep so concurrent downloads share one call rate."""
+        interval = self.cfg.dropbox.minimum_call_interval_seconds
+        if interval:
+            with self._rate_lock:
+                self.sleep(interval)
 
     def _call(
         self,
@@ -98,8 +115,7 @@ class DropboxAPIProvider:
                     raise DropboxAPIError(
                         f"Dropbox {endpoint} returned invalid JSON"
                     ) from exc
-                if settings.minimum_call_interval_seconds:
-                    self.sleep(settings.minimum_call_interval_seconds)
+                self._throttle()
                 return result
 
             safe_error = response.text[-4000:]
@@ -136,6 +152,69 @@ class DropboxAPIProvider:
             self.sleep(wait)
 
         raise AssertionError("unreachable Dropbox retry loop")
+
+    def _after_download_network_error(
+        self,
+        exc: requests.RequestException,
+        attempt: int,
+        settings: Dropbox,
+        delay: float,
+    ) -> float:
+        self.logger.warning(
+            "40_batches",
+            "files/download",
+            "Dropbox download request failed",
+            retry_count=attempt,
+            provider_category="NETWORK",
+            raw_error=str(exc),
+        )
+        if attempt == settings.max_attempts:
+            raise DropboxAPIError("Dropbox download exhausted network retries") from exc
+        self.sleep(delay)
+        return min(delay * 2, settings.maximum_backoff_seconds)
+
+    def download(self, path_lower: str, target: Path) -> None:
+        settings = self.cfg.dropbox
+        url = settings.content_base_url.rstrip("/") + "/files/download"
+        headers = {
+            "Authorization": f"Bearer {self.token}",
+            "Dropbox-API-Arg": json.dumps({"path": path_lower}),
+            "Content-Type": "text/plain",
+        }
+        delay = settings.initial_backoff_seconds
+        for attempt in range(1, settings.max_attempts + 1):
+            try:
+                response = self.session.post(
+                    url, headers=headers, stream=True, timeout=settings.timeout_seconds
+                )
+            except requests.RequestException as exc:
+                delay = self._after_download_network_error(
+                    exc, attempt, settings, delay
+                )
+                continue
+
+            if response.status_code == 200:
+                _write_download(response, target)
+                self._throttle()
+                return
+
+            category, wait, delay = _download_wait(response, delay, settings)
+            self.logger.warning(
+                "40_batches",
+                "files/download",
+                "Dropbox download will be retried",
+                retry_count=attempt,
+                provider_category=category,
+                raw_error=response.text[-4000:],
+                wait_seconds=wait,
+            )
+            if attempt == settings.max_attempts:
+                raise DropboxAPIError(
+                    f"Dropbox download exhausted retries after {category}"
+                )
+            self.sleep(wait)
+
+        raise AssertionError("unreachable Dropbox download retry loop")
 
     def identity(self, operation: str = "identity") -> DropboxIdentity:
         raw = self._call("users/get_current_account", None)
@@ -385,3 +464,52 @@ class DropboxAPIProvider:
                 f"Dropbox returned a path outside configured scope: {path!r}"
             )
         return "/" + "/".join(actual[len(expected) :])
+
+
+def _write_download(response: requests.Response, target: Path) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_name(f"{target.name}.part")
+    with tmp.open("wb") as handle:
+        for chunk in response.iter_content(DOWNLOAD_CHUNK_SIZE):
+            if chunk:
+                handle.write(chunk)
+    os.replace(tmp, target)
+
+
+def _download_wait(
+    response: requests.Response, delay: float, settings: Dropbox
+) -> tuple[str, float, float]:
+    """A retryable status returns (category, wait_seconds, next_delay); anything else
+    raises DropboxNotFound or DropboxAPIError directly."""
+    safe_error = response.text[-4000:]
+    if response.status_code == 409:
+        if _path_not_found(response):
+            raise DropboxNotFound("Dropbox object not found")
+        raise DropboxAPIError(f"Dropbox download failed with HTTP 409: {safe_error}")
+    if response.status_code == 429:
+        raw_retry = response.headers.get("Retry-After", "60")
+        try:
+            wait = max(0.0, float(raw_retry))
+        except ValueError:
+            wait = 60.0
+        return "RATE_LIMIT", wait, delay
+    if response.status_code in {500, 502, 503, 504}:
+        category = f"HTTP_{response.status_code}"
+        return category, delay, min(delay * 2, settings.maximum_backoff_seconds)
+    raise DropboxAPIError(
+        f"Dropbox download failed with HTTP {response.status_code}: {safe_error}"
+    )
+
+
+def _path_not_found(response: requests.Response) -> bool:
+    try:
+        body = response.json()
+    except ValueError:
+        return False
+    if not isinstance(body, dict):
+        return False
+    error = body.get("error")
+    if not isinstance(error, dict):
+        return False
+    path = error.get("path")
+    return isinstance(path, dict) and str(path.get(".tag", "")) == "not_found"

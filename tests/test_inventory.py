@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-import pytest
 from conftest import seed_api_inventory
 
 from migrator.phases import p10_inventory
-from migrator.phases.base import PhaseContext, PhaseError
+from migrator.phases.base import PhaseContext
 
 
-def _ctx(state_context, reconcile=False):
+def _ctx(state_context):
     cfg, paths, state, logger, runtime = state_context
     run_id = state.start_run(
         start_epoch=1,
@@ -15,7 +14,7 @@ def _ctx(state_context, reconcile=False):
         weekday=0,
         budget_minutes=1,
         host="t",
-        reconcile=reconcile,
+        reconcile=False,
     )
     phase_run_id = state.start_phase(10, "10_inventory", apply=False, inputs={})
     return PhaseContext(cfg, paths, state, logger, False, phase_run_id, run_id, runtime)
@@ -42,7 +41,6 @@ def test_inventory_records_counts_and_run_link(state_context, monkeypatch):
         "folders": 1,
         "bytes": 3,
         "non_downloadable": 1,
-        "observer": False,
         "unhashed": 0,
         "pruned_inventories": 0,
     }
@@ -82,37 +80,6 @@ def test_prune_keeps_newest_inventories(state_context):
         for r in state.connection.execute("SELECT inventory_id FROM dropbox_objects")
     }
     assert left == set(ids[2:])
-
-
-def test_reconcile_run_gates_on_observer(state_context, monkeypatch):
-    ctx = _ctx(state_context, reconcile=True)
-    inventory_id = seed_api_inventory(
-        ctx.state, "run:1", [("/A/one.txt", 3, "h1", 1, "file")]
-    )
-    monkeypatch.setattr(p10_inventory, "access_token", lambda cfg, runtime: "tok")
-    monkeypatch.setattr(
-        p10_inventory.DropboxAPIProvider,
-        "inventory",
-        lambda self, purpose, reuse_complete=True: inventory_id,
-    )
-    with ctx.state.connection:
-        cursor = ctx.state.connection.execute(
-            """INSERT INTO rclone_inventory_runs(started_at, completed_at, status, remote, root, version, purpose)
-               VALUES ('now','now','COMPLETE','dropbox','','v','run:1')"""
-        )
-        rclone_id = int(cursor.lastrowid)
-        ctx.state.connection.execute(
-            """INSERT INTO rclone_objects(inventory_id, object_key, path, comparison_key, name, is_dir, size,
-               dropbox_hash, raw_json) VALUES (?, '/a/one.txt', 'A/one.txt', '/a/one.txt', 'one.txt', 0, 4, 'h1', '{}')""",
-            (rclone_id,),
-        )
-    monkeypatch.setattr(
-        p10_inventory.DropboxRcloneProvider,
-        "inventory",
-        lambda self, purpose, reuse_complete=True: rclone_id,
-    )
-    with pytest.raises(PhaseError, match="discrepanc"):
-        p10_inventory.run(ctx)
 
 
 def test_phase_registers_access_token_for_redaction(state_context, monkeypatch):

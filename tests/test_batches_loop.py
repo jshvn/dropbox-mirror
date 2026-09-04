@@ -48,7 +48,8 @@ def _fake_steps(monkeypatch, seconds_per_batch, failing=()):
             "P", (), {"root_uid": lambda self, phase: "uid-destination"}
         )(),
     )
-    monkeypatch.setattr(p40_batches, "DropboxRcloneProvider", lambda *a, **k: object())
+    monkeypatch.setattr(p40_batches, "access_token", lambda cfg, runtime: "tok")
+    monkeypatch.setattr(p40_batches, "DropboxAPIProvider", lambda *a, **k: object())
     monkeypatch.setattr(p40_batches.session, "writeback", lambda *a: False)
     for name in ("fetch", "verify", "upload", "confirm", "roundtrip"):
         monkeypatch.setattr(batch, name, lambda ctx, *a, _n=name: {_n: 1})

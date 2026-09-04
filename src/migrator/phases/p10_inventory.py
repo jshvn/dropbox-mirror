@@ -4,15 +4,12 @@ import sqlite3
 
 from ..providers.dropbox_api import DropboxAPIProvider
 from ..providers.dropbox_auth import access_token
-from ..providers.dropbox_rclone import DropboxRcloneProvider
-from . import observer
 from .base import PhaseContext, PhaseResult
 
 PHASE = "10_inventory"
 # inventory-run table -> the tables keyed by its id
 _INVENTORY_TABLES = {
     "dropbox_inventory_runs": ("dropbox_objects", "dropbox_pages"),
-    "rclone_inventory_runs": ("rclone_objects", "rclone_folders"),
 }
 
 
@@ -38,7 +35,6 @@ def prune_inventories(connection: sqlite3.Connection, keep: int = 2) -> int:
 
 
 def run(ctx: PhaseContext) -> PhaseResult:
-    run = ctx.state.current_run()
     purpose = f"run:{ctx.run_id}"
     token = access_token(ctx.cfg, ctx.runtime)
     ctx.logger.add_secret(token)
@@ -53,11 +49,6 @@ def run(ctx: PhaseContext) -> PhaseResult:
             "AND is_downloadable=1 AND (content_hash IS NULL OR size IS NULL)",
             (inventory_id,),
         ).rowcount
-    observed = bool(run["reconcile"])
-    if observed:
-        rclone = DropboxRcloneProvider(ctx.cfg, ctx.paths, ctx.state, ctx.logger)
-        rclone_id = rclone.inventory(purpose, reuse_complete=True)
-        observer.gate(ctx, inventory_id, rclone_id)
     summary = ctx.state.connection.execute(
         """
         SELECT
@@ -76,7 +67,6 @@ def run(ctx: PhaseContext) -> PhaseResult:
         "folders": int(summary["folders"] or 0),
         "bytes": int(summary["bytes"] or 0),
         "non_downloadable": int(summary["non_downloadable"] or 0),
-        "observer": observed,
         "unhashed": int(unhashed),
         "pruned_inventories": prune_inventories(ctx.state.connection),
     }
