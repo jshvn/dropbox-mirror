@@ -214,12 +214,12 @@ def test_confirm_fails_the_batch_when_the_summary_reports_a_failure(state_contex
     assert counts == {"confirmed": 0, "skipped_identical": 0, "confirm_failed": 2}
     statuses = {r["path_lower"]: r["status"] for r in batch.items(ctx, batch_id)}
     assert statuses == {"/a.txt": "CONFIRM_FAILED", "/b.txt": "CONFIRM_FAILED"}
-    reason = json.loads(
-        ctx.state.connection.execute(
-            "SELECT details_json FROM batch_items WHERE batch_id=? AND path_lower='/a.txt'",
-            (batch_id,),
-        ).fetchone()[0]
-    )
+    raw = ctx.state.connection.execute(
+        "SELECT details_json FROM batch_items WHERE batch_id=? AND path_lower='/a.txt'",
+        (batch_id,),
+    ).fetchone()[0]
+    assert "a.txt" not in raw  # counts only, never the failing file's name
+    reason = json.loads(raw)
     assert reason["reason"] == "upload summary mismatch" and reason["failed"] == 1
 
 

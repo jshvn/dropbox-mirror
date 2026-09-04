@@ -154,7 +154,9 @@ def test_figures_and_markdown_carry_counts_never_names(
     assert figures["throttling"]["proton"]["rate_limited"] == 1
     assert figures["verification"] == {
         "confirmed_this_run": 1,
+        "confirm_failed": 0,
         "files_proven_cumulative": 1,
+        "reconcile_walk": "complete",
         "reconcile_matched": 1,
         "reconcile_dropped": 0,
         "reconcile_strays_trashed": 0,
@@ -190,7 +192,9 @@ def test_report_marks_failed_run_and_writes_no_chain(
     # No 60_reconcile figures event has ever been logged: no walk has run yet.
     assert p70_report.figures(ctx)["verification"] == {
         "confirmed_this_run": 1,
+        "confirm_failed": 0,
         "files_proven_cumulative": 1,
+        "reconcile_walk": "n/a",
         "reconcile_matched": "n/a",
         "reconcile_dropped": "n/a",
         "reconcile_strays_trashed": "n/a",
@@ -209,3 +213,76 @@ def test_report_marks_failed_run_and_writes_no_chain(
         "SELECT status FROM runs WHERE id=?", (ctx.run_id,)
     ).fetchone()
     assert row["status"] == "FAIL"
+
+
+def test_confirm_failures_surface_in_verification_and_errors(state_context):
+    ctx = _ctx(state_context)
+    with ctx.state.connection:
+        ctx.state.connection.execute(
+            """INSERT INTO batches(run_id, number, bytes, file_count, status, started_at, completed_at, details_json)
+               VALUES (?, 1, 10, 1, 'FAILED', 'now', 'now', ?)""",
+            (ctx.run_id, json.dumps({"confirmed": 0, "confirm_failed": 1})),
+        )
+    ctx.state.update_run(ctx.run_id, planned_batches=1, remaining_batches=0)
+    ctx.logger.error(
+        "40_batches",
+        "gate",
+        "a batch failed confirmation",
+        provider_category="VERIFICATION_FAILURE",
+        batch=1,
+    )
+    figures = p70_report.figures(ctx)
+    assert figures["verification"]["confirm_failed"] == 1
+    assert figures["errors"]["confirm failure"] == 1
+
+
+def test_reconcile_walk_partial_never_reads_as_a_clean_bill_of_health(state_context):
+    ctx = _ctx(state_context)
+    ctx.logger.info(
+        "60_reconcile",
+        "figures",
+        "reconcile figures",
+        snapshot_id=1,
+        complete=0,
+        folders_pending=7,
+    )
+    verification = p70_report.figures(ctx)["verification"]
+    assert verification["reconcile_walk"] == "partial, 7 folders pending"
+    # A partial walk logs no matched/dropped/strays/mismatch of its own: these must not
+    # read as a clean (zeroed) result until a walk actually finishes.
+    assert verification["reconcile_matched"] == "n/a"
+    assert verification["reconcile_dropped"] == "n/a"
+    assert verification["reconcile_strays_trashed"] == "n/a"
+    assert verification["mismatches"] == "n/a"
+
+
+def test_reconcile_walk_reports_the_latest_complete_walk_after_a_partial_one(
+    state_context,
+):
+    ctx = _ctx(state_context)
+    ctx.logger.info(
+        "60_reconcile",
+        "figures",
+        "reconcile figures",
+        snapshot_id=1,
+        complete=1,
+        matched=5,
+        dropped=1,
+        sha1_mismatch=0,
+        strays_trashed=2,
+    )
+    ctx.logger.info(
+        "60_reconcile",
+        "figures",
+        "reconcile figures",
+        snapshot_id=2,
+        complete=0,
+        folders_pending=3,
+    )
+    verification = p70_report.figures(ctx)["verification"]
+    # The most recent walk is still resuming, but the last complete walk's counts stand.
+    assert verification["reconcile_walk"] == "partial, 3 folders pending"
+    assert verification["reconcile_matched"] == 5
+    assert verification["reconcile_dropped"] == 1
+    assert verification["reconcile_strays_trashed"] == 2
+    assert verification["mismatches"] == 0

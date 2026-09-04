@@ -13,7 +13,7 @@ PHASE = "70_report"
 ERROR_CLASSES = {
     "content-hash mismatch": "content hash mismatch",
     "upload failure": "upload failed",
-    "confirm failure": "CONFIRM_FAILED",
+    "confirm failure": "failed confirmation",
     "listing refused": "floor",
     "session trouble": "login",
 }
@@ -35,17 +35,34 @@ def _batch_details(ctx: PhaseContext) -> list[dict[str, Any]]:
 
 def _reconcile_figures(ctx: PhaseContext) -> dict[str, Any]:
     """The latest weekly walk's own figures event, by the shared contract
-    (migrator.phases.p60_reconcile). Absent means no walk has run yet."""
-    row = ctx.state.connection.execute(
+    (migrator.phases.p60_reconcile). A walk that ran out of budget mid-walk logs
+    `complete=0` with zeroed matched/dropped/strays: those never stand in as evidence,
+    so matched/dropped/strays/mismatches come only from the latest COMPLETE walk, and
+    `reconcile_walk` separately says whether the most recent walk of either kind
+    finished. Absent entirely means no walk has run yet."""
+    connection = ctx.state.connection
+    latest = connection.execute(
         "SELECT fields_json FROM events WHERE phase='60_reconcile' AND operation='figures' "
         "ORDER BY id DESC LIMIT 1"
     ).fetchone()
-    fields = json.loads(row["fields_json"]) if row else {}
+    complete = connection.execute(
+        "SELECT fields_json FROM events WHERE phase='60_reconcile' AND operation='figures' "
+        "AND json_extract(fields_json, '$.complete')=1 ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    latest_fields = json.loads(latest["fields_json"]) if latest else {}
+    complete_fields = json.loads(complete["fields_json"]) if complete else {}
+    if not latest:
+        walk = "n/a"
+    elif int(latest_fields.get("complete", 0) or 0):
+        walk = "complete"
+    else:
+        walk = f"partial, {latest_fields.get('folders_pending', 'n/a')} folders pending"
     return {
-        "reconcile_matched": fields.get("matched", "n/a"),
-        "reconcile_dropped": fields.get("dropped", "n/a"),
-        "reconcile_strays_trashed": fields.get("strays_trashed", "n/a"),
-        "mismatches": fields.get("sha1_mismatch", "n/a"),
+        "reconcile_walk": walk,
+        "reconcile_matched": complete_fields.get("matched", "n/a"),
+        "reconcile_dropped": complete_fields.get("dropped", "n/a"),
+        "reconcile_strays_trashed": complete_fields.get("strays_trashed", "n/a"),
+        "mismatches": complete_fields.get("sha1_mismatch", "n/a"),
     }
 
 
@@ -206,6 +223,7 @@ def figures(ctx: PhaseContext) -> dict[str, Any]:
         "errors": errors,
         "verification": {
             "confirmed_this_run": _sum(details, "confirmed"),
+            "confirm_failed": _sum(details, "confirm_failed"),
             "files_proven_cumulative": cumulative_verified,
             **reconcile_fields,
         },
