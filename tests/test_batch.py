@@ -224,7 +224,8 @@ def test_confirm_uses_uid_path_for_duplicate_names_and_listing_failure(state_con
     assert counts == {"confirmed": 1, "confirm_failed": 1}
 
 
-def test_roundtrip_compares_bytes(state_context):
+def test_roundtrip_compares_bytes(state_context, monkeypatch):
+    monkeypatch.setattr(batch, "ROUNDTRIP_PROGRESS_EVERY", 2)
     ctx = _ctx(state_context)
     files = {"/a.txt": b"same", "/b.txt": b"orig"}
     batch_id = _batch(ctx, files)
@@ -250,6 +251,10 @@ def test_roundtrip_compares_bytes(state_context):
     rows = {r["path_lower"]: r["status"] for r in batch.items(ctx, batch_id)}
     assert rows == {"/a.txt": "ROUNDTRIP_OK", "/b.txt": "ROUNDTRIP_MISMATCH"}
     assert not any(ctx.paths.roundtrip.iterdir())
+    progress = ctx.state.connection.execute(
+        "SELECT message FROM events WHERE operation='roundtrip' AND message LIKE 'round-trip progress%'"
+    ).fetchall()
+    assert [r["message"] for r in progress] == ["round-trip progress: 1 of 2 files"]
 
 
 def test_roundtrip_defers_the_rest_when_the_run_budget_runs_out(

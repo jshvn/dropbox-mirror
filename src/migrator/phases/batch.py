@@ -28,6 +28,7 @@ now = time.time
 # The round-trip stops this far short of the run budget so checkpoint, trash and report
 # still have room; a batch left part-way keeps its CONFIRMED rows for the next run.
 ROUNDTRIP_MARGIN_SECONDS = 600
+ROUNDTRIP_PROGRESS_EVERY = 25
 
 
 def items(
@@ -343,7 +344,21 @@ def roundtrip(ctx: PhaseContext, proton: Any, batch_id: int) -> dict[str, int]:
         - ROUNDTRIP_MARGIN_SECONDS
     )
     counts: Counter[str] = Counter()
-    for row in items(ctx, batch_id, "CONFIRMED"):
+    rows = items(ctx, batch_id, "CONFIRMED")
+    began = now()
+    for index, row in enumerate(rows, start=1):
+        if index % ROUNDTRIP_PROGRESS_EVERY == 0:
+            # One CLI process per file and no Proton write: without this line the run
+            # looks idle from every side for as long as the batch takes.
+            ctx.logger.info(
+                PHASE,
+                "roundtrip",
+                f"round-trip progress: {index - 1} of {len(rows)} files",
+                batch=batch_id,
+                done=index - 1,
+                total=len(rows),
+                seconds=round(now() - began, 1),
+            )
         if now() >= deadline:
             counts["deferred"] += 1
             continue

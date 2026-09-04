@@ -77,6 +77,13 @@ def run(ctx: PhaseContext) -> PhaseResult:
         try:
             for name, step in steps:
                 step_began = now()
+                ctx.logger.info(
+                    PHASE,
+                    "step",
+                    f"batch {int(row['number'])} of {len(planned)}: {name} started",
+                    batch=int(row["number"]),
+                    step=name,
+                )
                 details.update(step())
                 details[f"{name}_seconds"] = round(now() - step_began, 1)
         except Exception:  # provider errors included: the batch row must say FAILED
