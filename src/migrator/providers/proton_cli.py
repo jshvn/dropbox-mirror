@@ -198,7 +198,8 @@ class ProtonCLIProvider:
         ]
         if len(matches) != 1 or unwrap(matches[0].get("type")) != "folder":
             raise ProtonCLIError(
-                "configured Proton destination did not resolve to exactly one folder"
+                f"configured Proton destination did not resolve to exactly one folder: "
+                f"{len(matches)} name match(es) among {len(listing)} entries of the parent"
             )
         observed = str(unwrap(matches[0].get("uid")) or "")
         expected = self.cfg.proton.expected_destination_uid
