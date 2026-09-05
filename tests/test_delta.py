@@ -119,3 +119,34 @@ def test_first_run_has_no_floor(state_context):
     )
     ctx.state.update_run(ctx.run_id, inventory_id=inventory_id)
     assert p20_delta.run(ctx).outputs["changed_files"] == 1
+
+
+def test_delta_drops_earlier_runs_rows(state_context):
+    ctx = _ctx(state_context)
+    inventory_id = seed_api_inventory(
+        ctx.state, "run:1", [("/a.txt", 1, "h1", 1, "file")]
+    )
+    ctx.state.update_run(ctx.run_id, inventory_id=inventory_id)
+    with ctx.state.connection:
+        ctx.state.connection.execute(
+            """INSERT INTO runs(id, started_at, start_epoch, hour_utc, weekday, budget_minutes, host, reconcile, status)
+               VALUES (999, 'earlier', 1, 0, 0, 1, 't', 0, 'SUCCESS')"""
+        )
+        ctx.state.connection.execute(
+            "INSERT INTO delta_changed(run_id, path_lower, path_display, size, content_hash) VALUES (999, '/old', '/old', 1, 'h')"
+        )
+        ctx.state.connection.execute(
+            "INSERT INTO delta_deleted(run_id, path_lower, path_display, proton_uid) VALUES (999, '/gone', '/gone', 'u')"
+        )
+    p20_delta.run(ctx)
+    runs = {
+        r[0]
+        for r in ctx.state.connection.execute(
+            "SELECT DISTINCT run_id FROM delta_changed"
+        )
+    }
+    assert runs == {ctx.run_id}
+    assert (
+        ctx.state.connection.execute("SELECT COUNT(*) FROM delta_deleted").fetchone()[0]
+        == 0
+    )

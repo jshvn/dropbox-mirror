@@ -67,8 +67,10 @@ def run(ctx: PhaseContext) -> PhaseResult:
         )
     display = display_paths(connection, inventory_id)
     with connection:
-        connection.execute("DELETE FROM delta_changed WHERE run_id=?", (ctx.run_id,))
-        connection.execute("DELETE FROM delta_deleted WHERE run_id=?", (ctx.run_id,))
+        # This run's delta is the only delta: earlier runs' rows were consumed by their
+        # own plan and trash steps and would otherwise ride along in every checkpoint.
+        connection.execute("DELETE FROM delta_changed")
+        connection.execute("DELETE FROM delta_deleted")
         changed = connection.execute(
             """
             SELECT d.path_lower, d.size, d.content_hash

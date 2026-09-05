@@ -13,8 +13,9 @@ _INVENTORY_TABLES = {
 }
 
 
-def prune_inventories(connection: sqlite3.Connection, keep: int = 2) -> int:
-    """Old listings are the bulk of the state, and every checkpoint ships the state to R2."""
+def prune_inventories(connection: sqlite3.Connection, keep: int = 1) -> int:
+    """Old listings are the bulk of the state, and every checkpoint ships the state to R2;
+    nothing reads a listing but the run that made it."""
     pruned = 0
     with connection:
         for runs_table, child_tables in _INVENTORY_TABLES.items():
@@ -84,6 +85,13 @@ def run(ctx: PhaseContext) -> PhaseResult:
             (inventory_id,),
         ).rowcount
     recased = recase_display_paths(ctx.state.connection, inventory_id)
+    with ctx.state.connection:
+        # Every column the pipeline reads is already its own column; the entry's raw
+        # API JSON is half the listing's bytes and nothing reads it back.
+        ctx.state.connection.execute(
+            "UPDATE dropbox_objects SET raw_json='{}' WHERE inventory_id=? AND raw_json != '{}'",
+            (inventory_id,),
+        )
     summary = ctx.state.connection.execute(
         """
         SELECT

@@ -48,7 +48,9 @@ def push(
         state.snapshot_to(snapshot)
         with (
             open(snapshot, "rb") as source,
-            lzma.open(compressed, "wb", preset=6) as target,
+            # preset 1 compresses the state in seconds where 6 takes minutes, for
+            # objects about a third larger; every checkpoint pays this once.
+            lzma.open(compressed, "wb", preset=1) as target,
         ):
             target.write(source.read())
         crypt.encrypt(runtime.age_identity, paths.age_key, compressed, encrypted)

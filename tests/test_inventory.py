@@ -81,6 +81,12 @@ def test_prune_keeps_newest_inventories(state_context):
         for r in state.connection.execute("SELECT inventory_id FROM dropbox_objects")
     }
     assert left == set(ids[2:])
+    assert p10_inventory.prune_inventories(state.connection) == 1  # default keeps one
+    left = {
+        r["inventory_id"]
+        for r in state.connection.execute("SELECT inventory_id FROM dropbox_objects")
+    }
+    assert left == {ids[3]}
 
 
 def test_phase_registers_access_token_for_redaction(state_context, monkeypatch):
@@ -117,8 +123,20 @@ def test_inventory_recases_paths_from_folder_names(state_context, monkeypatch):
         "inventory",
         lambda self, purpose, reuse_complete=True: inventory_id,
     )
+    with ctx.state.connection:
+        ctx.state.connection.execute(
+            'UPDATE dropbox_objects SET raw_json=\'{"tag": "file"}\' WHERE inventory_id=?',
+            (inventory_id,),
+        )
     result = p10_inventory.run(ctx)
     assert result.outputs["recased"] == 2
+    raw = {
+        r[0]
+        for r in ctx.state.connection.execute(
+            "SELECT raw_json FROM dropbox_objects WHERE inventory_id=?", (inventory_id,)
+        )
+    }
+    assert raw == {"{}"}  # the raw API JSON is dropped once the listing is complete
     displays = {
         r["path_lower"]: r["path_display"]
         for r in ctx.state.connection.execute(
