@@ -240,8 +240,9 @@ def _last_summary(report: Path) -> dict[str, Any] | None:
 
 def confirm(ctx: PhaseContext, batch_id: int) -> dict[str, int]:
     """The CLI's own summary is the evidence: no re-listing Proton. A batch confirms
-    when it reports no failures and its transferred-plus-skipped count matches every
-    verified file plus every directory it landed in."""
+    when transferred, skipped and failed items account for every verified file plus
+    every directory it landed in, and every failure names a file in the batch; those
+    files alone are left for the next run."""
     rows = items(ctx, batch_id, "VERIFIED")
     files = len(rows)
     if not files:
@@ -253,20 +254,39 @@ def confirm(ctx: PhaseContext, batch_id: int) -> dict[str, int]:
     transferred = int(summary.get("transferredItems", 0))
     skipped = int(summary.get("skippedItems", 0))
     failed = int(summary.get("failedItems", 0))
-    failures = summary.get("failures") or []
-    confirmed = not failed and not failures and transferred + skipped == files + folders
-    status = "CONFIRMED" if confirmed else "CONFIRM_FAILED"
+    failures = [f for f in summary.get("failures") or [] if isinstance(f, dict)]
+    # The CLI names a failure by basename alone, so every verified item carrying that
+    # name is left for the next run; an over-marked twin costs one content-identical
+    # skip. A failure naming nothing in the batch (a folder, say) means files were never
+    # attempted, and the whole batch stays unrecorded as before.
+    errors = {str(f.get("name") or ""): str(f.get("error") or "") for f in failures}
+    errors.pop("", None)
+    failed_rows = [
+        r for r in rows if PurePosixPath(str(r["path_display"])).name in errors
+    ]
+    matched = {PurePosixPath(str(r["path_display"])).name for r in failed_rows}
+    accounted = transferred + skipped + failed == files + folders
+    confirmed = accounted and failed == len(failures) and matched == set(errors)
+    good = files - len(failed_rows) if confirmed else 0
     with ctx.state.connection:
         if confirmed:
+            for row in failed_rows:
+                name = PurePosixPath(str(row["path_display"])).name
+                _set_item(
+                    ctx,
+                    batch_id,
+                    str(row["path_lower"]),
+                    "CONFIRM_FAILED",
+                    details_json=_details("upload failure", error=errors[name]),
+                )
             ctx.state.connection.execute(
-                "UPDATE batch_items SET status=? WHERE batch_id=? AND status='VERIFIED'",
-                (status, batch_id),
+                "UPDATE batch_items SET status='CONFIRMED' WHERE batch_id=? AND status='VERIFIED'",
+                (batch_id,),
             )
         else:
             ctx.state.connection.execute(
-                "UPDATE batch_items SET status=?, details_json=? WHERE batch_id=? AND status='VERIFIED'",
+                "UPDATE batch_items SET status='CONFIRM_FAILED', details_json=? WHERE batch_id=? AND status='VERIFIED'",
                 (
-                    status,
                     _details(
                         "upload summary mismatch",
                         files=files,
@@ -278,18 +298,30 @@ def confirm(ctx: PhaseContext, batch_id: int) -> dict[str, int]:
                     batch_id,
                 ),
             )
+    for name in sorted(matched) if confirmed else ():
+        # The error class reaches the log; the name stays in the encrypted state.
+        ctx.logger.warning(
+            PHASE,
+            "confirm",
+            "upload failure left for the next run",
+            batch=batch_id,
+            provider_category="UPLOAD_FAILURE",
+            raw_error=errors[name],
+        )
     ctx.logger.info(
         PHASE,
         "confirm",
         "batch confirmed by upload summary",
         batch=batch_id,
-        confirmed=files if confirmed else 0,
-        confirm_failed=0 if confirmed else files,
+        confirmed=good,
+        confirm_failed=files - good,
         skipped_identical=skipped if confirmed else 0,
     )
-    if confirmed:
-        return {"confirmed": files, "skipped_identical": skipped, "confirm_failed": 0}
-    return {"confirmed": 0, "skipped_identical": 0, "confirm_failed": files}
+    return {
+        "confirmed": good,
+        "skipped_identical": skipped if confirmed else 0,
+        "confirm_failed": files - good,
+    }
 
 
 def checkpoint(ctx: PhaseContext, store: Store, batch_id: int) -> dict[str, int]:
@@ -332,7 +364,9 @@ def checkpoint(ctx: PhaseContext, store: Store, batch_id: int) -> dict[str, int]
                 (batch_id,),
             ).fetchone()[0]
         )
-        status = "FAILED" if failed else "CHECKPOINTED"
+        # Only a batch that recorded nothing fails; named upload failures ride along
+        # and come back through the next delta.
+        status = "FAILED" if failed and not good else "CHECKPOINTED"
         connection.execute(
             "UPDATE batches SET status=?, completed_at=? WHERE id=?",
             (status, now, batch_id),

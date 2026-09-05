@@ -268,15 +268,51 @@ def test_confirm_matches_the_verified_count_with_a_merged_folder(state_context):
     }
 
 
-def test_confirm_fails_the_batch_when_the_summary_reports_a_failure(state_context):
+def test_confirm_leaves_a_named_failure_for_the_next_run(state_context):
+    ctx = _ctx(state_context)
+    files = {"/a.txt": b"aa", "/Docs/a.txt": b"twin", "/b.txt": b"bb"}
+    batch_id = _batch(ctx, files)
+    batch.fetch(ctx, FakeDropbox(files), batch_id)
+    batch.verify(ctx, batch_id)
+    proton = FakeProton({})
+    proton.fail = {"a.txt"}  # the CLI names failures by basename: both a.txt fail
+    batch.upload(ctx, proton, batch_id)
+    counts = batch.confirm(ctx, batch_id)
+    assert counts == {"confirmed": 1, "skipped_identical": 0, "confirm_failed": 2}
+    statuses = {r["path_lower"]: r["status"] for r in batch.items(ctx, batch_id)}
+    assert statuses == {
+        "/a.txt": "CONFIRM_FAILED",
+        "/docs/a.txt": "CONFIRM_FAILED",
+        "/b.txt": "CONFIRMED",
+    }
+    raw = ctx.state.connection.execute(
+        "SELECT details_json FROM batch_items WHERE batch_id=? AND path_lower='/a.txt'",
+        (batch_id,),
+    ).fetchone()[0]
+    assert json.loads(raw) == {
+        "reason": "upload failure",
+        "error": "ServerError: refused",
+    }
+
+
+def test_confirm_fails_the_batch_when_a_failure_names_nothing_in_it(state_context):
     ctx = _ctx(state_context)
     files = {"/a.txt": b"aa", "/b.txt": b"bb"}
     batch_id = _batch(ctx, files)
     batch.fetch(ctx, FakeDropbox(files), batch_id)
     batch.verify(ctx, batch_id)
-    proton = FakeProton({})
-    proton.fail = {"a.txt"}
-    batch.upload(ctx, proton, batch_id)
+    report = ctx.phase_dir(batch.PHASE) / f"upload-{batch_id}.json"
+    report.write_text(
+        json.dumps(
+            {
+                "transferredItems": 1,
+                "transferredBytes": 2,
+                "skippedItems": 0,
+                "failedItems": 1,
+                "failures": [{"name": "ghost", "error": "ServerError: refused"}],
+            }
+        )
+    )
     counts = batch.confirm(ctx, batch_id)
     assert counts == {"confirmed": 0, "skipped_identical": 0, "confirm_failed": 2}
     statuses = {r["path_lower"]: r["status"] for r in batch.items(ctx, batch_id)}
@@ -285,7 +321,6 @@ def test_confirm_fails_the_batch_when_the_summary_reports_a_failure(state_contex
         "SELECT details_json FROM batch_items WHERE batch_id=? AND path_lower='/a.txt'",
         (batch_id,),
     ).fetchone()[0]
-    assert "a.txt" not in raw  # counts only, never the failing file's name
     reason = json.loads(raw)
     assert reason["reason"] == "upload summary mismatch" and reason["failed"] == 1
 
@@ -329,9 +364,7 @@ def test_checkpoint_merges_confirmed_rows_and_pushes(state_context, plain_crypt)
     assert not any(ctx.paths.staging.iterdir())
 
 
-def test_checkpoint_fails_the_batch_when_a_row_confirm_failed(
-    state_context, plain_crypt
-):
+def test_checkpoint_keeps_a_batch_with_a_confirm_failed_row(state_context, plain_crypt):
     ctx = _ctx(state_context)
     files = {"/a.txt": b"same", "/b.txt": b"orig"}
     batch_id = _batch(ctx, files)
@@ -354,6 +387,25 @@ def test_checkpoint_fails_the_batch_when_a_row_confirm_failed(
     assert [r["path_lower"] for r in mirrored] == ["/a.txt"]
     assert (
         ctx.state.connection.execute("SELECT status FROM batches").fetchone()[0]
-        == "FAILED"
+        == "CHECKPOINTED"
     )
     assert not any(ctx.paths.staging.iterdir())
+
+
+def test_checkpoint_fails_the_batch_when_nothing_confirmed(state_context, plain_crypt):
+    ctx = _ctx(state_context)
+    files = {"/a.txt": b"same"}
+    batch_id = _batch(ctx, files)
+    batch.fetch(ctx, FakeDropbox(files), batch_id)
+    batch.verify(ctx, batch_id)
+    with ctx.state.connection:
+        ctx.state.connection.execute(
+            "UPDATE batch_items SET status='CONFIRM_FAILED' WHERE batch_id=?",
+            (batch_id,),
+        )
+    counts = batch.checkpoint(ctx, FakeStore(), batch_id)
+    assert counts == {"checkpointed": 0, "failed": 1}
+    assert (
+        ctx.state.connection.execute("SELECT status FROM batches").fetchone()[0]
+        == "FAILED"
+    )

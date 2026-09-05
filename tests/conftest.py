@@ -213,7 +213,13 @@ class FakeProton:
                 return
             if path.name in self.fail:
                 counts["failedItems"] += 1
-                failures.append({"name": path.name, "reason": "failed"})
+                failures.append(
+                    {
+                        "name": path.name,
+                        "error": "ServerError: refused",
+                        "nodeUid": None,
+                    }
+                )
             elif path.name in self.skip:
                 counts["skippedItems"] += 1
             else:

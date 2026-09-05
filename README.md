@@ -50,8 +50,8 @@ commands; the rest are phases and record their evidence in the state.
 | `fetch` | Empties staging and downloads the batch from Dropbox over the API by listed path, `download_workers` files in flight, each file landing under its display path so Proton receives Dropbox's casing. A path that vanished since listing is counted and skipped. |
 | `verify` | Recomputes every staged file's Dropbox content hash and records SHA-1 and SHA-256. A mismatch is a file edited between listing and fetch: removed, counted, never recorded. A batch where every file mismatches fails. |
 | `upload` | One `proton-drive filesystem upload` of the staging tree with `-f create-new-revision -d merge --skip-thumbnails`; Proton skips files whose content it already holds. |
-| `confirm` | Reads the upload summary and matches transferred and skipped counts against the batch; failures must be zero and the failures list empty, or nothing is recorded. Proton's server verifies every ciphertext block hash at upload; the weekly reconcile walk is the independent observation of what Proton holds. |
-| `checkpoint` | Merges the confirmed rows into `mirror_objects` and pushes the state to R2 under `.state/history/<epoch>-<batch>` and then, server-side, to the canonical key. Always the last step of a batch, so a killed run repeats at most one batch. |
+| `confirm` | Reads the upload summary: transferred, skipped and failed items must account for every verified file plus every folder, and every failure must name a file in the batch. Those files alone are recorded as failed, with the CLI's error text, and the rest confirm; a failure that names nothing in the batch, or counts that do not add up, leave the whole batch unrecorded. Proton's server verifies every ciphertext block hash at upload; the weekly reconcile walk is the independent observation of what Proton holds. |
+| `checkpoint` | Merges the confirmed rows into `mirror_objects` and pushes the state to R2 under `.state/history/<epoch>-<batch>` and then, server-side, to the canonical key. A batch with failed files still checkpoints what confirmed; those files are absent from `mirror_objects`, so the next run's delta lists them again. Only a batch that recorded nothing fails the run. Always the last step of a batch, so a killed run repeats at most one batch. |
 | `trash` | Only when every planned batch landed: groups deleted rows by parent folder, one listing and one `filesystem trash` per folder. A folder that cannot be listed is recorded and retried the next run. |
 | `reconcile` | On the first run of the configured weekday, or with `RECONCILE=true`: a full Proton walk, comparing Proton's own listed size and SHA-1 against `mirror_objects`. State rows Proton lacks, mis-sizes or mismatches are dropped so they re-upload; Proton nodes under the destination that neither Dropbox nor the state knows are trashed. A walk that does not fit one run's budget resumes where it stopped on the next reconcile run, and a partial walk drops and trashes nothing. |
 | `report` | Builds the step summary from the state alone, finishes the run row, writes the chain marker, pushes the state, and returns the run status so a failed run stops before the success ping. |
@@ -61,8 +61,8 @@ Every step is plan-by-default. `batches`, `trash`, `reconcile`, `report` and `em
 change anything only with `--apply`, which the Taskfile passes in `task pipeline` and never in
 `task plan-pipeline`. No mutation is trusted on its exit status: the state push is trusted
 only once the object lands, and nothing is recorded as uploaded on a command's exit code
-alone. The evidence has three layers: the upload summary per batch (transferred plus
-skipped counts matched against what was verified, zero failures); Proton's own
+alone. The evidence has three layers: the upload summary per batch (transferred, skipped
+and failed items matched against what was verified, each failure named); Proton's own
 server-side block hashes, checked at upload time and out of this repo's hands; and the
 weekly reconcile walk, which compares Proton's own listing, its size and SHA-1 for every
 node under the destination, against `mirror_objects`, independent of anything a batch
@@ -429,6 +429,10 @@ is ignored by git.
 - **The state looks wrong after a run.** `task state-rollback` lists the dated copies;
   `task state-rollback -- <key>` copies one over the canonical state. The next run repeats
   from there, and re-uploads skip content Proton already holds.
+- **The report shows files confirm failed.** Proton's CLI refused those uploads, usually
+  a passing server error; the error text is in the state under the batch item. The batch
+  checkpointed without them and the next run re-uploads them. A file that fails every
+  night is worth reading the error for.
 - **A run stops on budget every night without finishing.** Lower `batch_files` or
   `batch_gb`; the throughput and batch-duration rows say which. A run that checkpointed
   nothing does not chain and fails instead, so a batch that fails identically cannot loop.
