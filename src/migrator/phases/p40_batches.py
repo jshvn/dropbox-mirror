@@ -40,9 +40,15 @@ def run(ctx: PhaseContext) -> PhaseResult:
         ctx.logger,
         after_call=lambda: session.writeback(ctx.runtime, ctx.paths, store),
     )
-    token = access_token(ctx.cfg, ctx.runtime)
-    ctx.logger.add_secret(token)
-    dropbox = DropboxAPIProvider(ctx.cfg, ctx.state, ctx.logger, token=token)
+    # A Dropbox access token lives four hours and a run up to six, so the provider
+    # gets a fresh one before every batch's fetch, the only step that calls Dropbox.
+    dropbox = DropboxAPIProvider(ctx.cfg, ctx.state, ctx.logger, token="")
+
+    def fetch(batch_id: int) -> dict[str, int]:
+        dropbox.token = access_token(ctx.cfg, ctx.runtime)
+        ctx.logger.add_secret(dropbox.token)
+        return batch.fetch(ctx, dropbox, batch_id)
+
     # Unconditional: the one Proton call a quiet night is guaranteed to make. It forces any
     # pending token rotation (after_call writes the session back) and keeps the 60-day
     # idle expiry away, besides gating on the destination UID.
@@ -70,7 +76,7 @@ def run(ctx: PhaseContext) -> PhaseResult:
                 "UPDATE batches SET started_at=? WHERE id=?", (utc_now(), batch_id)
             )
         steps = (
-            ("fetch", lambda bid=batch_id: batch.fetch(ctx, dropbox, bid)),
+            ("fetch", lambda bid=batch_id: fetch(bid)),
             ("verify", lambda bid=batch_id: batch.verify(ctx, bid)),
             ("upload", lambda bid=batch_id: batch.upload(ctx, proton, bid)),
             ("confirm", lambda bid=batch_id: batch.confirm(ctx, bid)),

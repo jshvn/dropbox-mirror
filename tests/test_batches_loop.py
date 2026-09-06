@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -49,7 +50,9 @@ def _fake_steps(monkeypatch, seconds_per_batch, failing=()):
         )(),
     )
     monkeypatch.setattr(p40_batches, "access_token", lambda cfg, runtime: "tok")
-    monkeypatch.setattr(p40_batches, "DropboxAPIProvider", lambda *a, **k: object())
+    monkeypatch.setattr(
+        p40_batches, "DropboxAPIProvider", lambda *a, **k: SimpleNamespace(token="")
+    )
     monkeypatch.setattr(p40_batches.session, "writeback", lambda *a: False)
     for name in ("fetch", "verify", "upload", "confirm"):
         monkeypatch.setattr(batch, name, lambda ctx, *a, _n=name: {_n: 1})
@@ -138,3 +141,19 @@ def test_without_apply_is_planned_only(state_context, monkeypatch):
     result = p40_batches.run(ctx)
     assert result.status == "PLANNED" and result.outputs["planned"] == 2
     assert ctx.state.current_run()["remaining_batches"] is None
+
+
+def test_token_is_minted_fresh_for_every_batch_fetch(state_context, monkeypatch):
+    """Dropbox access tokens live four hours and a run up to six: one token minted at
+    phase start expired mid-run on 2026-09-06, failing batch 31 of 46."""
+    ctx = _ctx(state_context, budget_minutes=100)
+    _planned(ctx, 3)
+    _fake_steps(monkeypatch, seconds_per_batch=60)
+    minted = iter(("tok1", "tok2", "tok3"))
+    monkeypatch.setattr(p40_batches, "access_token", lambda cfg, runtime: next(minted))
+    seen: list[str] = []
+    monkeypatch.setattr(
+        batch, "fetch", lambda ctx, dropbox, bid: seen.append(dropbox.token) or {}
+    )
+    p40_batches.run(ctx)
+    assert seen == ["tok1", "tok2", "tok3"]
