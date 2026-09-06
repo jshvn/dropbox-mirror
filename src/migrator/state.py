@@ -159,6 +159,10 @@ CREATE TABLE IF NOT EXISTS dropbox_objects (
 );
 CREATE INDEX IF NOT EXISTS idx_dropbox_objects_compare
 ON dropbox_objects(inventory_id, comparison_key);
+-- delta and report join mirror_objects to the listing by path; without this every
+-- mirrored row scanned the whole listing, and delta grew from minutes to hours.
+CREATE INDEX IF NOT EXISTS idx_dropbox_objects_path
+ON dropbox_objects(inventory_id, path_lower);
 
 CREATE TABLE IF NOT EXISTS proton_snapshots (
     id INTEGER PRIMARY KEY,
