@@ -239,9 +239,10 @@ which picks up from the state in R2. Each run's step summary shows percent mirro
 projected runs remaining. The first run also builds the toolbox image on the runner,
 which takes a few minutes before any step logs.
 
-The default budget is 165 minutes under a 180-minute job timeout, which leaves the last
-batch's upload and the report room to finish. GitHub's hard limit for one job is six
-hours, so `budget_minutes` up to about 340 is safe if fewer, longer runs are wanted.
+The default budget is 335 minutes under a 355-minute job timeout, just under GitHub's
+six-hour limit for one job: every run pays one image build, one Dropbox listing and one
+unused tail of up to a batch, so fewer, longer runs waste less. The 20-minute gap leaves
+the last batch's upload and the report room to finish.
 Actions minutes on a public repository are free, so the seed can run on Actions alone.
 For a 200,000-file tree expect about 36 hours of Proton upload at the measured 0.65 s per
 file plus 6 to 10 hours of Dropbox downloads, around 45 hours in all, or roughly sixteen
@@ -318,8 +319,8 @@ lockfiles go, and nothing tracked or unignored is touched.
 [sync.yml](.github/workflows/sync.yml) is dispatch-only. Inputs: `reconcile` (force the
 Proton walk) and `budget_minutes` (override the run budget). `concurrency: {group: sync,
 cancel-in-progress: false}` is what queues a chained or scheduled run behind a running
-one; overlap would kill the Proton session. `timeout-minutes: 180` against a default budget
-of 165 leaves the last batch's upload and the report room to finish. The job uses one
+one; overlap would kill the Proton session. `timeout-minutes: 355` against a default budget
+of 335 leaves the last batch's upload and the report room to finish. The job uses one
 third-party action, SHA-pinned `actions/checkout`; it installs go-task and the 1Password
 CLI at the versions and checksums in `config/toolchain.lock.toml`, and every step that
 needs the vault runs `task op`, the same `op run --env-file=op.env` wrapper the laptop
