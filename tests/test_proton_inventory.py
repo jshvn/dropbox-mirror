@@ -361,26 +361,6 @@ def test_walk_adopts_the_session_a_worker_refreshed_and_retries_the_loser(
     }
 
 
-def test_folder_size_is_one_server_side_call(state_context):
-    cfg, _, state, logger, _ = state_context
-    calls = []
-
-    def runner(argv, **kwargs):
-        calls.append(argv)
-        return subprocess.CompletedProcess(
-            argv, 0, json.dumps({"size": 12, "numberOfDescendants": 3}), ""
-        )
-
-    provider = ProtonCLIProvider(cfg, state, logger, run=runner, sleep=lambda _: None)
-    assert provider.folder_size("60_reconcile") == {
-        "size": 12,
-        "numberOfDescendants": 3,
-    }
-    assert calls == [
-        [cfg.proton.executable, "filesystem", "size", "-j", cfg.proton.destination]
-    ]
-
-
 def test_worker_listings_never_write_the_shared_session_back_from_a_thread(
     state_context,
 ):

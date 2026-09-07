@@ -87,27 +87,6 @@ def _correct_mirror(
     return dropped, refreshed, matched, sha1_mismatch, known
 
 
-def _size_check(ctx: PhaseContext, proton: ProtonCLIProvider) -> None:
-    """One server-side call against the mirror's own record. Proton's total counts
-    trashed descendants too, so it can only legitimately exceed the record; a total
-    below it means something the mirror believes it uploaded is gone. Every apply run
-    pays this one call so a loss surfaces the next night, not the next walk."""
-    size = proton.folder_size(PHASE)
-    files, mirror_bytes = ctx.state.mirror_totals()
-    short = max(0, mirror_bytes - size["size"])
-    log = ctx.logger.warning if short else ctx.logger.info
-    log(
-        PHASE,
-        "size",
-        "Proton size check",
-        proton_bytes=size["size"],
-        proton_descendants=size["numberOfDescendants"],
-        mirror_bytes=mirror_bytes,
-        mirror_files=files,
-        short_bytes=short,
-    )
-
-
 def run(ctx: PhaseContext) -> PhaseResult:
     run = ctx.state.current_run()
     skipped = None
@@ -127,7 +106,6 @@ def run(ctx: PhaseContext) -> PhaseResult:
         after_call=lambda: session.writeback(ctx.runtime, ctx.paths, store),
         session_dir=ctx.paths.session,
     )
-    _size_check(ctx, proton)
     if skipped:
         return PhaseResult(outputs={"skipped": skipped})
     proton.root_uid(PHASE)

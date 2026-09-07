@@ -163,7 +163,6 @@ def test_figures_and_markdown_carry_counts_never_names(
         "reconcile_dropped": 0,
         "reconcile_strays_trashed": 0,
         "mismatches": 0,
-        "proton_size_check": "n/a",
     }
     result = p70_report.run(ctx)
     text = ctx.paths.report.read_text(encoding="utf-8")
@@ -202,7 +201,6 @@ def test_report_marks_failed_run_and_writes_no_chain(
         "reconcile_dropped": "n/a",
         "reconcile_strays_trashed": "n/a",
         "mismatches": "n/a",
-        "proton_size_check": "n/a",
     }
     monkeypatch.setattr(p70_report, "Store", lambda runtime, paths: FakeStore())
     pid = ctx.state.start_phase(
@@ -290,34 +288,3 @@ def test_reconcile_walk_reports_the_latest_complete_walk_after_a_partial_one(
     assert verification["reconcile_dropped"] == 1
     assert verification["reconcile_strays_trashed"] == 2
     assert verification["mismatches"] == 0
-
-
-def test_proton_size_check_reads_the_latest_size_event(state_context):
-    ctx = _ctx(state_context)
-    _populate(ctx)
-    ctx.logger.info(
-        "60_reconcile",
-        "size",
-        "Proton size check",
-        proton_bytes=12,
-        proton_descendants=3,
-        mirror_bytes=15,
-        mirror_files=2,
-        short_bytes=3,
-    )
-    assert p70_report.figures(ctx)["verification"]["proton_size_check"] == (
-        "SHORT by 3 bytes (Proton 12, mirror 15)"
-    )
-    ctx.logger.info(
-        "60_reconcile",
-        "size",
-        "Proton size check",
-        proton_bytes=20,
-        proton_descendants=3,
-        mirror_bytes=15,
-        mirror_files=2,
-        short_bytes=0,
-    )
-    assert p70_report.figures(ctx)["verification"]["proton_size_check"] == (
-        "ok (Proton 20, mirror 15)"
-    )

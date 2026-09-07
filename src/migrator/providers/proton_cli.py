@@ -598,30 +598,6 @@ class ProtonCLIProvider:
                 (category, snapshot_id, str(folder["uid"])),
             )
 
-    def folder_size(self, phase: str) -> dict[str, int]:
-        """Proton's own server-side total for the destination: bytes and node count of
-        every descendant, trashed ones included. One call, no walk."""
-        payload = self._json_command(
-            "filesystem_size",
-            [
-                self.cfg.proton.executable,
-                "filesystem",
-                "size",
-                "-j",
-                self.cfg.proton.destination,
-            ],
-            phase=phase,
-            attempts=self.cfg.proton.list_max_attempts,
-        )
-        if not isinstance(payload, dict) or not {"size", "numberOfDescendants"} <= set(
-            payload
-        ):
-            raise ProtonCLIError("Proton filesystem size returned an unexpected shape")
-        return {
-            "size": int(payload["size"]),
-            "numberOfDescendants": int(payload["numberOfDescendants"]),
-        }
-
     def upload_tree(self, sources: list[Path], destination: str, phase: str) -> str:
         argv = [
             self.cfg.proton.executable,

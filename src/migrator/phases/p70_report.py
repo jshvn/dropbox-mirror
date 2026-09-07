@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import math
-import sqlite3
 from typing import Any
 
 from .. import statefile
@@ -64,22 +63,7 @@ def _reconcile_figures(ctx: PhaseContext) -> dict[str, Any]:
         "reconcile_dropped": complete_fields.get("dropped", "n/a"),
         "reconcile_strays_trashed": complete_fields.get("strays_trashed", "n/a"),
         "mismatches": complete_fields.get("sha1_mismatch", "n/a"),
-        "proton_size_check": _size_check_figure(connection),
     }
-
-
-def _size_check_figure(connection: sqlite3.Connection) -> str:
-    """The latest nightly size check (migrator.phases.p60_reconcile._size_check)."""
-    row = connection.execute(
-        "SELECT fields_json FROM events WHERE phase='60_reconcile' AND operation='size' "
-        "ORDER BY id DESC LIMIT 1"
-    ).fetchone()
-    if not row:
-        return "n/a"
-    fields = json.loads(row["fields_json"])
-    detail = f"(Proton {fields['proton_bytes']}, mirror {fields['mirror_bytes']})"
-    short = int(fields.get("short_bytes", 0) or 0)
-    return f"SHORT by {short} bytes {detail}" if short else f"ok {detail}"
 
 
 def _throttling(

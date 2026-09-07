@@ -200,9 +200,6 @@ class FakeProton:
     def root_uid(self, phase):
         return "uid-destination"
 
-    def folder_size(self, phase):
-        return {"size": 10**12, "numberOfDescendants": 10**6}
-
     def upload_tree(self, sources, destination, phase):
         self.uploads.append(([str(s) for s in sources], destination))
         counts = Counter()
