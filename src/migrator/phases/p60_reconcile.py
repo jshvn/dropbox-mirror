@@ -87,6 +87,45 @@ def _correct_mirror(
     return dropped, refreshed, matched, sha1_mismatch, known
 
 
+def _stray_folders(
+    connection: sqlite3.Connection, snapshot_id: int, inventory_id: int, known: set[str]
+) -> list[str]:
+    """Proton folders under the destination that Dropbox no longer has and that hold
+    nothing the mirror knows about, topmost only: trashing a folder takes its subtree
+    with it, and a folder still holding a file on record waits for that file's own
+    trash call."""
+    dropbox_folders = {
+        comparison_key(str(row["path_display"]))
+        for row in connection.execute(
+            "SELECT path_display FROM dropbox_objects WHERE inventory_id=? AND tag='folder'",
+            (inventory_id,),
+        )
+    }
+    occupied: set[str] = set()
+    for key in known:
+        while "/" in key:
+            key = key.rsplit("/", 1)[0]
+            if key in occupied:
+                break
+            occupied.add(key)
+    folders = connection.execute(
+        "SELECT uid, parent_uid, comparison_key, cli_path FROM proton_nodes "
+        "WHERE snapshot_id=? AND LOWER(node_type)='folder'",
+        (snapshot_id,),
+    ).fetchall()
+    strays = {
+        str(row["uid"]): row
+        for row in folders
+        if row["comparison_key"] not in dropbox_folders
+        and row["comparison_key"] not in occupied
+    }
+    return sorted(
+        str(row["cli_path"])
+        for row in strays.values()
+        if str(row["parent_uid"]) not in strays
+    )
+
+
 def run(ctx: PhaseContext) -> PhaseResult:
     run = ctx.state.current_run()
     skipped = None
@@ -142,6 +181,7 @@ def run(ctx: PhaseContext) -> PhaseResult:
             dropped=0,
             uid_refreshed=0,
             strays_trashed=0,
+            folders_trashed=0,
             sha1_mismatch=0,
         )
         return PhaseResult(outputs={"partial": folders_pending})
@@ -176,6 +216,9 @@ def run(ctx: PhaseContext) -> PhaseResult:
     )
     if strays:
         proton.trash(strays, PHASE)
+    stray_folders = _stray_folders(connection, snapshot_id, run["inventory_id"], known)
+    if stray_folders:
+        proton.trash(stray_folders, PHASE)
     statefile.push(ctx.state, ctx.runtime, ctx.paths, store, label=label)
     ctx.logger.info(
         PHASE,
@@ -190,6 +233,7 @@ def run(ctx: PhaseContext) -> PhaseResult:
         dropped=dropped,
         uid_refreshed=refreshed,
         strays_trashed=len(strays),
+        folders_trashed=len(stray_folders),
         sha1_mismatch=sha1_mismatch,
     )
     outputs = {
@@ -198,6 +242,7 @@ def run(ctx: PhaseContext) -> PhaseResult:
         "dropped": dropped,
         "uid_refreshed": refreshed,
         "strays_trashed": len(strays),
+        "folders_trashed": len(stray_folders),
         "matched": matched,
         "sha1_mismatch": sha1_mismatch,
     }

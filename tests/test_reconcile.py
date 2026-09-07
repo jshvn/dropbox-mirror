@@ -54,6 +54,26 @@ def _snapshot(state, nodes, status="COMPLETE"):
     return snapshot_id
 
 
+def _folders(state, snapshot_id, folders):
+    """folders: (relative, uid, parent_uid) folder nodes of a snapshot."""
+    with state.connection:
+        for relative, uid, parent_uid in folders:
+            state.connection.execute(
+                """INSERT INTO proton_nodes(snapshot_id, uid, parent_uid, visible_segments_json, relative_path, cli_path,
+                   comparison_key, name, node_type, raw_json)
+                   VALUES (?, ?, ?, '[]', ?, ?, ?, ?, 'folder', '{}')""",
+                (
+                    snapshot_id,
+                    uid,
+                    parent_uid,
+                    relative,
+                    "/my-files/Dropbox/" + relative,
+                    comparison_key(relative),
+                    relative.rsplit("/", 1)[-1],
+                ),
+            )
+
+
 def _mirror(state, rows):
     """rows: (display, size, uid) or (display, size, uid, sha1)."""
     with state.connection:
@@ -262,3 +282,58 @@ def test_reconcile_skips_when_not_scheduled(state_context, monkeypatch, plain_cr
 def test_reconcile_skips_while_batches_remain(state_context, monkeypatch, plain_crypt):
     ctx = _ctx(state_context, remaining=1)
     assert p60_reconcile.run(ctx).outputs == {"skipped": "batches remain"}
+
+
+def test_reconcile_trashes_empty_folders_dropbox_no_longer_has(
+    state_context, monkeypatch, plain_crypt
+):
+    ctx = _ctx(state_context)
+    inventory_id = seed_api_inventory(
+        ctx.state,
+        "run:1",
+        [("/Keep", 0, None, 1, "folder"), ("/Keep/ok.txt", 3, "h", 1, "file")],
+    )
+    ctx.state.update_run(ctx.run_id, inventory_id=inventory_id)
+    _mirror(
+        ctx.state,
+        [
+            ("/Keep/ok.txt", 3, "u-ok", "sha-ok"),
+            ("/Held/late.txt", 2, "u-late", "sha-l"),
+        ],
+    )
+    snapshot_id = _snapshot(
+        ctx.state,
+        [("Keep/ok.txt", "u-ok", 3, "sha-ok"), ("Held/late.txt", "u-late", 2, "sha-l")],
+    )
+    _folders(
+        ctx.state,
+        snapshot_id,
+        [
+            ("Keep", "u-keep", "__ROOT__"),
+            ("Gone", "u-gone", "__ROOT__"),
+            ("Gone/Sub", "u-sub", "u-gone"),
+            ("Held", "u-held", "__ROOT__"),
+        ],
+    )
+    trashed = []
+    fake = type(
+        "P",
+        (),
+        {
+            "root_uid": lambda self, phase: "uid-destination",
+            "inventory": lambda self, purpose, phase, reuse_complete=True, deadline=None: (
+                snapshot_id
+            ),
+            "trash": lambda self, paths, phase: trashed.append(list(paths)),
+        },
+    )()
+    monkeypatch.setattr(p60_reconcile, "ProtonCLIProvider", lambda *a, **k: fake)
+    monkeypatch.setattr(p60_reconcile, "Store", lambda runtime, paths: FakeStore())
+    monkeypatch.setattr(p60_reconcile.session, "writeback", lambda *a: False)
+    result = p60_reconcile.run(ctx)
+    # Gone and Gone/Sub are folders Dropbox no longer has, holding nothing the mirror
+    # knows: the topmost one goes and takes Sub with it. Held is gone from Dropbox too
+    # but still holds a file on record, so it stays until that file is trashed.
+    assert trashed == [["/my-files/Dropbox/Gone"]]
+    assert result.outputs["folders_trashed"] == 1
+    assert _figures_event(ctx.state)["folders_trashed"] == 1

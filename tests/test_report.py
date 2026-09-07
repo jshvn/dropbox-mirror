@@ -126,6 +126,7 @@ def test_figures_and_markdown_carry_counts_never_names(
         sha1_mismatch=0,
         uid_refreshed=0,
         strays_trashed=0,
+        folders_trashed=0,
     )
     store = FakeStore()
     monkeypatch.setattr(p70_report, "Store", lambda runtime, paths: store)
@@ -162,6 +163,7 @@ def test_figures_and_markdown_carry_counts_never_names(
         "reconcile_matched": 1,
         "reconcile_dropped": 0,
         "reconcile_strays_trashed": 0,
+        "reconcile_folders_trashed": 0,
         "mismatches": 0,
     }
     result = p70_report.run(ctx)
@@ -200,6 +202,7 @@ def test_report_marks_failed_run_and_writes_no_chain(
         "reconcile_matched": "n/a",
         "reconcile_dropped": "n/a",
         "reconcile_strays_trashed": "n/a",
+        "reconcile_folders_trashed": "n/a",
         "mismatches": "n/a",
     }
     monkeypatch.setattr(p70_report, "Store", lambda runtime, paths: FakeStore())

@@ -62,6 +62,7 @@ def _reconcile_figures(ctx: PhaseContext) -> dict[str, Any]:
         "reconcile_matched": complete_fields.get("matched", "n/a"),
         "reconcile_dropped": complete_fields.get("dropped", "n/a"),
         "reconcile_strays_trashed": complete_fields.get("strays_trashed", "n/a"),
+        "reconcile_folders_trashed": complete_fields.get("folders_trashed", "n/a"),
         "mismatches": complete_fields.get("sha1_mismatch", "n/a"),
     }
 
