@@ -113,6 +113,10 @@ def test_reconcile_drops_missing_missized_and_sha1_mismatched(
         (),
         {
             "root_uid": lambda self, phase: "uid-destination",
+            "folder_size": lambda self, phase: {
+                "size": 10**12,
+                "numberOfDescendants": 1,
+            },
             "inventory": lambda self, purpose, phase, reuse_complete=True, deadline=None: (
                 walked.append((purpose, reuse_complete, deadline)) or snapshot_id
             ),
@@ -171,6 +175,10 @@ def test_reconcile_matches_a_digest_proton_reports_in_upper_case(
         (),
         {
             "root_uid": lambda self, phase: "uid-destination",
+            "folder_size": lambda self, phase: {
+                "size": 10**12,
+                "numberOfDescendants": 1,
+            },
             "inventory": lambda self, purpose, phase, reuse_complete=True, deadline=None: (
                 snapshot_id
             ),
@@ -219,6 +227,10 @@ def test_reconcile_partial_walk_pushes_state_and_touches_nothing(
         (),
         {
             "root_uid": lambda self, phase: "uid-destination",
+            "folder_size": lambda self, phase: {
+                "size": 10**12,
+                "numberOfDescendants": 1,
+            },
             "inventory": lambda self, purpose, phase, reuse_complete=True, deadline=None: (
                 snapshot_id
             ),
@@ -254,11 +266,77 @@ def test_reconcile_partial_walk_pushes_state_and_touches_nothing(
     assert fields["sha1_mismatch"] == 0
 
 
+def _size_only(monkeypatch, size, descendants):
+    fake = type(
+        "P",
+        (),
+        {
+            "folder_size": lambda self, phase: {
+                "size": size,
+                "numberOfDescendants": descendants,
+            }
+        },
+    )()
+    monkeypatch.setattr(p60_reconcile, "ProtonCLIProvider", lambda *a, **k: fake)
+    monkeypatch.setattr(p60_reconcile, "Store", lambda runtime, paths: FakeStore())
+    monkeypatch.setattr(p60_reconcile.session, "writeback", lambda *a: False)
+
+
+def _size_event(state):
+    row = state.connection.execute(
+        "SELECT fields_json FROM events WHERE phase='60_reconcile' AND operation='size'"
+    ).fetchone()
+    return json.loads(row["fields_json"]) if row else None
+
+
 def test_reconcile_skips_when_not_scheduled(state_context, monkeypatch, plain_crypt):
     ctx = _ctx(state_context, reconcile=False)
+    _size_only(monkeypatch, 15, 2)
     assert p60_reconcile.run(ctx).outputs == {"skipped": "not a reconcile run"}
 
 
 def test_reconcile_skips_while_batches_remain(state_context, monkeypatch, plain_crypt):
     ctx = _ctx(state_context, remaining=1)
+    _size_only(monkeypatch, 15, 2)
     assert p60_reconcile.run(ctx).outputs == {"skipped": "batches remain"}
+
+
+def test_size_check_runs_on_every_apply_run_and_flags_a_short_proton_total(
+    state_context, monkeypatch, plain_crypt
+):
+    # Proton's total counts trashed descendants too, so it can only legitimately be
+    # larger than the mirror's record; smaller means something the mirror uploaded is
+    # gone. Two files of 10 and 5 bytes on record, Proton reporting 12.
+    ctx = _ctx(state_context, reconcile=False)
+    _mirror(ctx.state, [("/A/a.txt", 10, "u1"), ("/A/b.txt", 5, "u2")])
+    _size_only(monkeypatch, 12, 3)
+    p60_reconcile.run(ctx)
+    assert _size_event(ctx.state) == {
+        "proton_bytes": 12,
+        "proton_descendants": 3,
+        "mirror_bytes": 15,
+        "mirror_files": 2,
+        "short_bytes": 3,
+    }
+
+
+def test_size_check_is_not_run_without_apply(state_context, monkeypatch, plain_crypt):
+    cfg, paths, state, logger, runtime = state_context
+    run_id = state.start_run(
+        start_epoch=1,
+        hour_utc=0,
+        weekday=0,
+        budget_minutes=1,
+        host="t",
+        reconcile=False,
+    )
+    state.update_run(run_id, planned_batches=0, remaining_batches=0)
+    phase_run_id = state.start_phase(60, "60_reconcile", apply=False, inputs={})
+    ctx = PhaseContext(cfg, paths, state, logger, False, phase_run_id, run_id, runtime)
+    monkeypatch.setattr(
+        p60_reconcile,
+        "ProtonCLIProvider",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("no CLI without --apply")),
+    )
+    p60_reconcile.run(ctx)
+    assert _size_event(state) is None

@@ -87,13 +87,37 @@ def _correct_mirror(
     return dropped, refreshed, matched, sha1_mismatch, known
 
 
+def _size_check(ctx: PhaseContext, proton: ProtonCLIProvider) -> None:
+    """One server-side call against the mirror's own record. Proton's total counts
+    trashed descendants too, so it can only legitimately exceed the record; a total
+    below it means something the mirror believes it uploaded is gone. Every apply run
+    pays this one call so a loss surfaces the next night, not the next walk."""
+    size = proton.folder_size(PHASE)
+    files, mirror_bytes = ctx.state.mirror_totals()
+    short = max(0, mirror_bytes - size["size"])
+    log = ctx.logger.warning if short else ctx.logger.info
+    log(
+        PHASE,
+        "size",
+        "Proton size check",
+        proton_bytes=size["size"],
+        proton_descendants=size["numberOfDescendants"],
+        mirror_bytes=mirror_bytes,
+        mirror_files=files,
+        short_bytes=short,
+    )
+
+
 def run(ctx: PhaseContext) -> PhaseResult:
     run = ctx.state.current_run()
+    skipped = None
     if not run["reconcile"]:
-        return PhaseResult(outputs={"skipped": "not a reconcile run"})
-    if run["remaining_batches"] is None or int(run["remaining_batches"]) > 0:
-        return PhaseResult(outputs={"skipped": "batches remain"})
+        skipped = "not a reconcile run"
+    elif run["remaining_batches"] is None or int(run["remaining_batches"]) > 0:
+        skipped = "batches remain"
     if not ctx.apply:
+        if skipped:
+            return PhaseResult(outputs={"skipped": skipped})
         return PhaseResult(status="PLANNED", outputs={"planned": "full Proton walk"})
     store = Store(ctx.runtime, ctx.paths)
     proton = ProtonCLIProvider(
@@ -101,15 +125,18 @@ def run(ctx: PhaseContext) -> PhaseResult:
         ctx.state,
         ctx.logger,
         after_call=lambda: session.writeback(ctx.runtime, ctx.paths, store),
+        session_dir=ctx.paths.session,
     )
+    _size_check(ctx, proton)
+    if skipped:
+        return PhaseResult(outputs={"skipped": skipped})
     proton.root_uid(PHASE)
     deadline = int(run["start_epoch"]) + int(run["budget_minutes"]) * 60 - 600
-    # ponytail: the walk is one CLI process per folder, so its cost is the folder count,
-    # not the file count; a few thousand folders fit a run, tens of thousands do not. A
-    # stable purpose plus reuse_complete=False resumes the RUNNING snapshot the deadline
-    # or a killed run left behind instead of restarting at the root, and still refuses to
-    # reuse a COMPLETE walk from a previous reconcile. The upgrade path is a recursive
-    # listing.
+    # ponytail: the walk is one CLI process per folder, spread over proton.walk_workers
+    # workers, each folder addressed by UID. Its cost is the folder count divided by the
+    # workers; a stable purpose plus reuse_complete=False resumes the RUNNING snapshot
+    # the deadline or a killed run left behind instead of restarting at the root, and
+    # still refuses to reuse a COMPLETE walk from a previous reconcile.
     snapshot_id = proton.inventory(
         SNAPSHOT_PURPOSE, PHASE, reuse_complete=False, deadline=deadline
     )

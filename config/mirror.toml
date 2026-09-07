@@ -29,5 +29,10 @@ ceiling_gb = 4000
 disk_headroom_gb = 1
 listing_floor_ratio = 0.5
 
+[proton]
+# The reconcile walk is one `filesystem list` process per folder; this many run at once,
+# each from its own copy of the CLI session. Eight matches dropbox.download_workers.
+walk_workers = 8
+
 [reconcile]
 weekday = 0

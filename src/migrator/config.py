@@ -134,6 +134,7 @@ class Proton:
     maximum_backoff_seconds: float = 120
     command_timeout_seconds: float = 300
     transfer_timeout_seconds: float = 3600
+    walk_workers: int = 8
 
 
 @dataclass(frozen=True)
@@ -257,6 +258,11 @@ def validate_config(cfg: Config) -> None:
     _positive(cfg.proton.maximum_backoff_seconds, "proton.maximum_backoff_seconds")
     _positive(cfg.proton.command_timeout_seconds, "proton.command_timeout_seconds")
     _positive(cfg.proton.transfer_timeout_seconds, "proton.transfer_timeout_seconds")
+    if (
+        type(cfg.proton.walk_workers) is not int
+        or not 1 <= cfg.proton.walk_workers <= 32
+    ):
+        raise ConfigError("proton.walk_workers must be 1 to 32")
     _positive(cfg.budget.batch_gb, "budget.batch_gb")
     _positive_int(cfg.budget.batch_files, "budget.batch_files")
     _positive(cfg.budget.max_file_gb, "budget.max_file_gb")

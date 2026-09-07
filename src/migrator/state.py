@@ -562,7 +562,11 @@ class State:
         operation: str,
         safe_argv: list[str],
         attempt: int,
+        *,
+        started_at: str | None = None,
     ) -> int:
+        """`started_at` lets a caller that ran the command on another thread record
+        when it really began."""
         with self.connection:
             cursor = self.connection.execute(
                 """
@@ -576,7 +580,7 @@ class State:
                     provider,
                     operation,
                     _json(safe_argv),
-                    utc_now(),
+                    started_at or utc_now(),
                     attempt,
                 ),
             )
@@ -590,6 +594,7 @@ class State:
         *,
         stdout_artifact: str | None = None,
         stderr_artifact: str | None = None,
+        completed_at: str | None = None,
     ) -> None:
         with self.connection:
             self.connection.execute(
@@ -600,7 +605,7 @@ class State:
                 WHERE id=?
                 """,
                 (
-                    utc_now(),
+                    completed_at or utc_now(),
                     exit_code,
                     category,
                     stdout_artifact,

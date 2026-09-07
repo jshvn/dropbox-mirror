@@ -30,6 +30,7 @@ def test_defaults_and_derived_bytes(tmp_path):
     assert cfg.budget.run_budget_minutes == 165
     assert cfg.budget.ceiling_gb == 4000
     assert cfg.proton.destination == "/my-files/Dropbox"
+    assert cfg.proton.walk_workers == 8
     assert cfg.reconcile.weekday == 0
 
 
@@ -57,6 +58,10 @@ def test_numeric_floors(tmp_path):
         load_config(_write(tmp_path, GOOD + "\n[budget]\nlisting_floor_ratio = 1.5\n"))
     with pytest.raises(ConfigError, match="weekday"):
         load_config(_write(tmp_path, GOOD + "\n[reconcile]\nweekday = 7\n"))
+    with pytest.raises(ConfigError, match="walk_workers"):
+        load_config(_write(tmp_path, GOOD + "\nwalk_workers = 0\n"))
+    with pytest.raises(ConfigError, match="walk_workers"):
+        load_config(_write(tmp_path, GOOD + "\nwalk_workers = 33\n"))
 
 
 BARE = """
