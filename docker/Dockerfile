@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.7
-# Toolbox for dropbox-mirror. The repo is bind-mounted at /work; this image holds
+# Toolbox for katoptra/dropbox. The repo is bind-mounted at /work; this image holds
 # the toolchain only, pinned by config/toolchain.lock.toml.
 FROM python:3.13.15-slim-bookworm@sha256:ed86c82274b3c69b52fb5820f358f0bd7df0b603332063cb5c6e32bd220c3e6e AS fetch
 

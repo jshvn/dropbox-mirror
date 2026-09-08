@@ -1,4 +1,4 @@
-# dropbox-mirror: nightly Dropbox -> Proton Drive mirror run from GitHub Actions.
+# dropbox: nightly Dropbox -> Proton Drive mirror run from GitHub Actions.
 #
 # Invariant: every step runs inside the toolbox image, on a laptop and in CI
 # alike, and R2 holds the only record of how far the mirror has got. Secrets
@@ -6,7 +6,7 @@
 version: '3'
 
 vars:
-  IMAGE: dropbox-mirror:toolbox
+  IMAGE: dropbox:toolbox
   ENGINE:
     sh: |
       if [ -n "$ENGINE" ]; then echo "$ENGINE"
@@ -39,7 +39,7 @@ tasks:
         b=$(printf '\033[1m'); c=$(printf '\033[1;36m'); d=$(printf '\033[2m'); r=$(printf '\033[0m')
         printf '%s\n' \
           "" \
-          "${b}dropbox-mirror${r}   ${d}nightly Dropbox -> Proton Drive mirror; R2 holds the state${r}" \
+          "${b}dropbox${r}   ${d}nightly Dropbox -> Proton Drive mirror; R2 holds the state${r}" \
           "" \
           "${c}read -- looks at Dropbox, Proton and R2, changes nothing${r}" \
           "  task plan                 Fetch state, list Dropbox, print what a sync would move" \

@@ -1,4 +1,4 @@
-## 🪞 dropbox-mirror
+## 🪞 dropbox
 
 A self-chaining GitHub Actions pipeline that mirrors a Dropbox account into Proton Drive.
 After each run Proton Drive holds what Dropbox held at listing time, under one folder of
@@ -104,7 +104,7 @@ to keep in step. The twelve references resolve five vault items:
 Create a vault for this repo and a service account scoped to that vault alone. Store the
 service-account token in your personal vault (never in the vault it reads) and as the one
 GitHub repository secret, `OP_SERVICE_ACCOUNT_TOKEN`. Put the vault into the references
-in `op.env`, by name if the name has no slash (`op://dropbox-mirror/...`), otherwise by
+in `op.env`, by name if the name has no slash (`op://katoptra-dropbox/...`), otherwise by
 UUID from `op vault get <name> --format json`: a secret reference has exactly three
 segments, so a slash in a vault name cannot be written. Neither the name nor the UUID is a
 secret: without the service-account token it opens nothing.
@@ -254,7 +254,7 @@ it only while no Actions run is in progress.
 
 ### 9. Schedule
 
-Add `schedules/dropbox-mirror.ts` to jshvn/dispatch with `10 2 * * *`. A scheduled run
+Add `schedules/dropbox.ts` to jshvn/dispatch with `10 2 * * *`. A scheduled run
 queues behind a chained one in the workflow's concurrency group. After three green nights,
 edit one file and delete one file in Dropbox and confirm both appear in Proton the next
 morning: the edit as a new revision, the delete in Proton's trash.

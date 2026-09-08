@@ -3,7 +3,7 @@ requires = ["setuptools>=80"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "dropbox-mirror"
+name = "katoptra-dropbox"
 version = "0.1.0"
 description = "Nightly Dropbox to Proton Drive mirror run from GitHub Actions"
 requires-python = ">=3.13"

@@ -252,7 +252,7 @@ def _table(title: str, rows: dict[str, Any]) -> str:
 
 
 def render(fig: dict[str, Any], status: str) -> str:
-    out = f"## dropbox-mirror run: {status}\n\n"
+    out = f"## dropbox run: {status}\n\n"
     out += _table("Mirror status", fig["mirror"])
     out += _table("This run", fig["run"])
     out += _table("Throughput", fig["throughput"])

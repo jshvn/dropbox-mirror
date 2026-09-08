@@ -2,6 +2,8 @@
 # (MIRROR_DROPBOX_ACCOUNT_ID, MIRROR_PROTON_DESTINATION, MIRROR_PROTON_DESTINATION_UID)
 # come from the environment; see op.env.
 [mirror]
+# The primary key of the state in R2; every run row references it. The repository
+# is katoptra/dropbox, but this value is the state's and never changes.
 id = "dropbox-mirror"
 
 [dropbox]
