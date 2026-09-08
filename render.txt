@@ -1,0 +1,14 @@
+task: [clock] python -m migrator clock
+task: [clock] date -u '+%s %H %u' > .run/start.txt
+task: [session] python -m migrator session
+task: [state] python -m migrator state
+task: [inventory] python -m migrator inventory
+task: [delta] python -m migrator delta
+task: [plan-phase] python -m migrator plan
+task: [batches] python -m migrator --apply batches
+task: [trash] python -m migrator --apply trash
+task: [reconcile] python -m migrator --apply reconcile
+task: [report-phase] python -m migrator --apply report
+task: [report-mirror] test -f .run/report.md || python -m migrator --apply report || true
+task: [report-mirror] test ! -f .run/report.md || cat .run/report.md >> "${GITHUB_STEP_SUMMARY:-/dev/stdout}"
+task: [ping] python -m migrator ping

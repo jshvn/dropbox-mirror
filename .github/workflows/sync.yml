@@ -1,74 +1,17 @@
 name: sync
-
 on:
   workflow_dispatch:
     inputs:
-      reconcile:
-        description: Force a full Proton walk this run
-        type: boolean
-        default: false
-      budget_minutes:
-        description: Wall-clock budget for batches (default from config/mirror.toml)
+      vars:
+        description: 'KEY=value pairs for the pipeline, e.g. "RECONCILE=true RUN_BUDGET_MIN=30"'
         type: string
-        default: ""
-
-# Overlap kills the Proton session; the group also queues a chained or scheduled
-# run behind the one in progress.
-concurrency:
-  group: sync
-  cancel-in-progress: false
-
+        default: ''
 permissions:
   contents: read
-  actions: write   # chain: gh workflow run
-
+  actions: write   # the called workflow chains the next run; a called workflow cannot raise this
+concurrency: {group: sync, cancel-in-progress: false}
 jobs:
   sync:
-    runs-on: ubuntu-latest
-    timeout-minutes: 355
-    env:
-      RECONCILE: ${{ inputs.reconcile }}
-      RUN_BUDGET_MIN: ${{ inputs.budget_minutes }}
-      # The one repository secret. `task op` wraps every step that needs the vault in
-      # `op run --env-file=op.env`, the same command the laptop runs, so op.env is the
-      # only list of references.
-      OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Install go-task and the 1Password CLI at the locked versions
-        run: |
-          set -eu
-          lock() { python3 -c 'import sys, tomllib; d = tomllib.load(open("config/toolchain.lock.toml", "rb")); print(eval(sys.argv[1], {"d": d}))' "$1"; }
-          task_version="$(lock 'd["task"]["version"]')"
-          task_sha="$(lock 'd["task"]["linux_amd64"]["sha256"]')"
-          curl -fsSL "https://github.com/go-task/task/releases/download/v${task_version}/task_linux_amd64.tar.gz" -o /tmp/task.tgz
-          echo "${task_sha}  /tmp/task.tgz" | sha256sum -c -
-          sudo tar -xzf /tmp/task.tgz -C /usr/local/bin task
-          op_version="$(lock 'd["op"]["version"]')"
-          op_sha="$(lock 'd["op"]["linux_amd64"]["sha256"]')"
-          curl -fsSL "https://cache.agilebits.com/dist/1P/op2/pkg/v${op_version}/op_linux_amd64_v${op_version}.zip" -o /tmp/op.zip
-          echo "${op_sha}  /tmp/op.zip" | sha256sum -c -
-          sudo unzip -q -o /tmp/op.zip op -d /usr/local/bin
-
-      - name: Run the pipeline in the toolbox
-        run: task op -- task pipeline
-
-      - name: Publish the report; ping /fail unless the job succeeded
-        if: always()
-        run: |
-          # report.md exists whenever the report phase ran (it also finished the run row, so
-          # a second pass has no RUNNING run). A run that died earlier gets its report now.
-          if [ ! -f .run/report.md ]; then task op -- task report-phase || true; fi
-          if [ -f .run/report.md ]; then cat .run/report.md >> "$GITHUB_STEP_SUMMARY"; fi
-          if [ "${{ job.status }}" != "success" ]; then task op -- task ping-fail; fi
-
-      - name: Chain the next run
-        if: success()
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          if [ -f .run/chain ]; then
-            gh workflow run sync.yml --ref "$GITHUB_REF_NAME"
-            echo "chained: next run queued" >> "$GITHUB_STEP_SUMMARY"
-          fi
+    uses: katoptra/lib/.github/workflows/sync.yml@v1
+    with: {vars: '${{ inputs.vars }}', timeout-minutes: 355}
+    secrets: inherit

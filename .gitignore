@@ -1,4 +1,5 @@
 .run/
+.task/
 tests/fixtures/live/
 __pycache__/
 .pytest_cache/

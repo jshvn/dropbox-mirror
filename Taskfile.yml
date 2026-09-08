@@ -3,129 +3,61 @@
 # Invariant: every step runs inside the toolbox image, on a laptop and in CI
 # alike, and R2 holds the only record of how far the mirror has got. Secrets
 # reach processes by name from 1Password (op.env); nothing is written to disk.
+#
+# The toolbox, which starts a run, contains it in the image, resolves its secrets,
+# renders and checks it and reports it, is katoptra/lib's, included below at v1 and
+# flattened into this file. What is here is the mirror's own: the pipeline in order,
+# one migrator command a step, the operator verbs around it, and its part of the
+# report. The migrator keeps its own clock and its own pings, so those three verbs
+# are excluded from the include and defined here.
 version: '3'
 
 vars:
-  IMAGE: dropbox:toolbox
-  ENGINE:
-    sh: |
-      if [ -n "$ENGINE" ]; then echo "$ENGINE"
-      elif command -v container >/dev/null 2>&1 && container system status >/dev/null 2>&1; then echo container
-      elif command -v docker >/dev/null 2>&1; then echo docker
-      elif command -v container >/dev/null 2>&1; then echo container
-      else echo docker
-      fi
-  # Every name in op.env crosses into the container by name, never by value.
-  PASS_ENV:
-    sh: grep -v '^#' op.env | sed -n 's/=.*//p' | sed 's/^/-e /' | tr '\n' ' '; printf '%s' '-e RUN_BUDGET_MIN -e RECONCILE -e ENGINE -e MIRROR_VERBOSE -e GITHUB_RUN_ID'
   RUN_EPOCH:
     sh: date +%s
 
-# Run-scoped environment for the step tasks below. AWS_REGION is an ENV line in the
-# Dockerfile so that every in-toolbox command sees it, wrapped by an inner `task` or not.
+# Run-scoped environment for every migrator command. RECONCILE and RUN_BUDGET_MIN are
+# task vars a run sets after the double dash (task sync -- RECONCILE=true
+# RUN_BUDGET_MIN=30, or the workflow's vars input), mapped to the names the migrator
+# reads; unset, they render empty, which it reads as unset. AWS_REGION is an ENV line
+# in the image, so every in-toolbox command sees it.
 env:
   MIRROR_RUN_EPOCH: '{{.RUN_EPOCH}}'
   MIRROR_WORK_DIR: .run
   MIRROR_CONFIG: config/mirror.toml
+  RECONCILE: '{{.RECONCILE | default ""}}'
+  RUN_BUDGET_MIN: '{{.RUN_BUDGET_MIN | default ""}}'
+  PROTON_DRIVE_LOG_LEVEL: INFO   # the Proton CLI's own log level; its lines reach the public job log
+
+includes:
+  toolbox:
+    taskfile: https://raw.githubusercontent.com/katoptra/lib/v1/toolbox.yml
+    flatten: true
+    excludes: [clock, ping, ping-fail, report-mirror]
+    vars:
+      NAME: dropbox
+      DESC: nightly Dropbox -> Proton Drive mirror; R2 holds the state
+      IMAGE: ghcr.io/katoptra/toolbox:proton-v1
+      PASS: MIRROR_VERBOSE
+      MENU: >-
+        ""
+        "${c}read -- looks at Dropbox, Proton and R2, changes nothing${r}"
+        "  task status               Counts and the last run's figures from the state in R2"
+        ""
+        "${c}checks -- offline, no credentials${r}"
+        "  task test                 pytest inside the toolbox"
+        "  task lint                 ruff check + format check"
+        "  task fmt                  ruff format"
+        ""
+        "${c}write -- changes Proton Drive and the state in R2${r}"
+        "  task sync -- RUN_BUDGET_MIN=30 RECONCILE=true"
+        "                            ${d}a shorter budget; a forced Proton walk (the literal word true)${r}"
+        "  task empty-trash          Permanently delete Proton trash (never scheduled)"
+        "  task state-rollback -- k  Copy a history object over the canonical state"
+        "                            ${d}with no key it lists the history${r}"
+        "  task session-seal -- dir  Encrypt a laptop Proton CLI session into R2"
 
 tasks:
-  default:
-    desc: Print the menu
-    silent: true
-    # ponytail: hand-maintained listing -- go-task can neither group nor annotate,
-    # so a new task means a line below. `task --list` stays the generated view.
-    cmds:
-      - |
-        b=$(printf '\033[1m'); c=$(printf '\033[1;36m'); d=$(printf '\033[2m'); r=$(printf '\033[0m')
-        printf '%s\n' \
-          "" \
-          "${b}dropbox${r}   ${d}nightly Dropbox -> Proton Drive mirror; R2 holds the state${r}" \
-          "" \
-          "${c}read -- looks at Dropbox, Proton and R2, changes nothing${r}" \
-          "  task plan                 Fetch state, list Dropbox, print what a sync would move" \
-          "                            ${d}needs secrets; starts a run row but never mutates Proton${r}" \
-          "  task status               Counts and the last run's figures from the state in R2" \
-          "" \
-          "${c}checks -- offline, no credentials${r}" \
-          "  task test                 pytest inside the toolbox" \
-          "  task lint                 ruff check + format check" \
-          "  task fmt                  ruff format" \
-          "  task render               Dry-run the whole pipeline: every command, no network" \
-          "" \
-          "${c}write -- changes Proton Drive and the state in R2${r}" \
-          "  task sync                 One budgeted run: batches, trash, reconcile, report, ping" \
-          "                            ${d}RUN_BUDGET_MIN=n overrides the budget; RECONCILE=true forces a Proton walk${r}" \
-          "  task empty-trash          Permanently delete Proton trash (never scheduled)" \
-          "  task state-rollback -- k  Copy a history object over the canonical state" \
-          "                            ${d}with no key it lists the history${r}" \
-          "  task session-seal -- dir  Encrypt a laptop Proton CLI session into R2" \
-          "" \
-          "${c}toolbox${r}" \
-          "  task image                Build the toolbox image (no-op while it exists)" \
-          "  task image-clean          Remove it so the next task image rebuilds" \
-          "  task clean                Delete .run, the caches and every other ignored file" \
-          "  task run -- <cmd>         Run any command in the toolbox with the repo at /work" \
-          "  task op -- <cmd>          Same, with secrets from 1Password via op.env" \
-          ""
-
-  image:
-    desc: Build the toolbox image
-    run: once
-    # Image presence is the freshness check; a Dockerfile edit needs `task image-clean`.
-    status:
-      - '{{.ENGINE}} image inspect {{.IMAGE}} >/dev/null 2>&1'
-    cmds:
-      - '{{.ENGINE}} build -t {{.IMAGE}} -f docker/Dockerfile .'
-
-  image-clean:
-    desc: Remove the toolbox image
-    cmds:
-      - '{{.ENGINE}} image rm {{.IMAGE}}'
-
-  clean:
-    desc: Delete every file git ignores (.run, caches, local leftovers)
-    cmds:
-      - git clean -fdX
-
-  run:
-    desc: 'Run any command in the toolbox image, e.g. task run -- task test'
-    deps: [image]
-    # Neither -i nor -t: Apple container 1.3.1 leaves the host terminal non-blocking
-    # after a run that attaches stdin or a tty, and the next host process that writes
-    # more than the terminal buffer holds (cat of a report, say) dies with EAGAIN.
-    # Output still streams both ways and Ctrl-C still stops the container.
-    cmds:
-      - >-
-        {{.ENGINE}} run --rm
-        --user $(id -u):$(id -g)
-        -v "{{.ROOT_DIR}}":/work -w /work
-        -e HOME=/tmp
-        {{.PASS_ENV}}
-        {{.IMAGE}} {{.CLI_ARGS}}
-
-  op:
-    desc: 'Run a command in the toolbox with secrets from 1Password'
-    cmds:
-      - op run --env-file=op.env -- task run -- {{.CLI_ARGS}}
-
-  test:
-    desc: Run the test suite inside the toolbox
-    cmds:
-      - task: run
-        vars: { CLI_ARGS: 'python -m pytest {{.CLI_ARGS}}' }
-
-  lint:
-    desc: ruff check and format check
-    cmds:
-      - task: run
-        vars: { CLI_ARGS: 'sh -c "ruff check src tests && ruff format --check src tests"' }
-
-  fmt:
-    desc: ruff format
-    cmds:
-      - task: run
-        vars: { CLI_ARGS: 'ruff format src tests' }
-
   # ---- pipeline (runs inside the toolbox; each step is one migrator command) ----
   pipeline:
     desc: The full budgeted run, inside the toolbox
@@ -140,10 +72,11 @@ tasks:
       - task: trash
       - task: reconcile
       - task: report-phase
+      - task: report
       - task: ping
 
   plan-pipeline:
-    desc: Read-only half of the pipeline, inside the toolbox
+    desc: Read-only half of the pipeline, inside the toolbox; prints the report it would make
     cmds:
       - task: clock
       - task: session
@@ -152,8 +85,13 @@ tasks:
       - task: delta
       - task: plan-phase
       - python -m migrator report   # no --apply: a read-only plan pushes nothing to R2
+      - cat .run/report.md
 
-  clock:      { internal: true, cmds: ['python -m migrator clock'] }
+  clock:
+    internal: true
+    cmds:
+      - python -m migrator clock
+      - date -u '+%s %H %u' > .run/start.txt   # the toolbox's report reads it for its Started row
   session:    { internal: true, cmds: ['python -m migrator session'] }
   state:      { internal: true, cmds: ['python -m migrator state'] }
   inventory:  { internal: true, cmds: ['python -m migrator inventory'] }
@@ -162,10 +100,10 @@ tasks:
   batches:    { internal: true, cmds: ['python -m migrator --apply batches'] }
   trash:      { internal: true, cmds: ['python -m migrator --apply trash'] }
   reconcile:  { internal: true, cmds: ['python -m migrator --apply reconcile'] }
-  ping:       { internal: true, cmds: ['python -m migrator ping'] }
-  # Not internal: the GitHub workflow's failure path invokes these from the
-  # command line, and go-task refuses to run an internal task that way.
-  report-phase: { cmds: ['python -m migrator --apply report'] }
+  # Builds .run/report.md from the state, closes the run row, writes the chain marker.
+  report-phase: { internal: true, cmds: ['python -m migrator --apply report'] }
+  ping:         { internal: true, cmds: ['python -m migrator ping'] }
+  # Not internal: the toolbox's sync runs it from the command line after a failed pipeline.
   ping-fail:    { cmds: ['python -m migrator ping fail'] }
   empty-trash-pipeline:
     internal: true
@@ -175,48 +113,55 @@ tasks:
       - task: state
       - python -m migrator --apply empty-trash
 
-  # ---- read ----
-  plan:
-    desc: Fetch state, list Dropbox, print what a sync would move
+  # The toolbox's report calls this after its own rows: at the end of the pipeline, and
+  # from sync's failure path after one that died anywhere. A run that died before its
+  # report phase gets one now, closing the run row; then the report goes on the job page
+  # under the toolbox's rows.
+  report-mirror:
+    internal: true
     cmds:
-      - task: op
-        vars: { CLI_ARGS: task plan-pipeline }
-      - cat .run/report.md
+      - test -f .run/report.md || python -m migrator --apply report || true
+      - test ! -f .run/report.md || cat .run/report.md >> "${GITHUB_STEP_SUMMARY:-/dev/stdout}"
 
+  # ---- read ----
   status:
     desc: Counts from the state in R2
     cmds:
       - task: op
-        vars: { CLI_ARGS: python -m migrator status }
+        vars: { ARGS: python -m migrator status }
 
-  render:
-    desc: Dry-run the whole pipeline inside the toolbox with no network
+  # ---- checks ----
+  test:
+    desc: Run the test suite inside the toolbox
     cmds:
-      - task: run
-        vars: { CLI_ARGS: 'task --dry --force pipeline' }
+      - task run -- python -m pytest {{.CLI_ARGS}}
+
+  lint:
+    desc: ruff check and format check
+    cmds:
+      - task run -- sh -c 'ruff check src tests && ruff format --check src tests'
+
+  fmt:
+    desc: ruff format
+    cmds:
+      - task run -- ruff format src tests
 
   # ---- write ----
-  sync:
-    desc: One budgeted run with secrets from 1Password
-    cmds:
-      - task: op
-        vars: { CLI_ARGS: task pipeline }
-
   empty-trash:
     desc: Permanently delete Proton trash
     prompt: This permanently deletes everything in Proton Drive trash. Continue?
     cmds:
       - task: op
-        vars: { CLI_ARGS: task empty-trash-pipeline }
+        vars: { ARGS: task empty-trash-pipeline }
 
   state-rollback:
     desc: 'Copy a history object over the canonical state: task state-rollback -- <key>'
     cmds:
       - task: op
-        vars: { CLI_ARGS: 'python -m migrator state-rollback {{.CLI_ARGS}}' }
+        vars: { ARGS: 'python -m migrator state-rollback {{.CLI_ARGS}}' }
 
   session-seal:
     desc: 'Encrypt a laptop Proton CLI session into R2: task session-seal -- <cache dir>'
     cmds:
       - task: op
-        vars: { CLI_ARGS: 'python -m migrator session-seal {{.CLI_ARGS}}' }
+        vars: { ARGS: 'python -m migrator session-seal {{.CLI_ARGS}}' }

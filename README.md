@@ -28,14 +28,17 @@ The infrastructure modules under `src/migrator/` (SQLite evidence schema, one-pa
 atomic writes, redacting logger, path guards, and the two providers for the Dropbox API
 and the official `proton-drive` CLI) come from
 [donphi/dropbox_proton](https://github.com/donphi/dropbox_proton) at commit `cfd0e57`,
-MIT, whose copyright notice is retained in [LICENSE](LICENSE). The mirror phases, the
-Taskfile, the toolbox image, and the workflows are this repo's own.
+MIT, whose copyright notice is retained in [LICENSE](LICENSE). The mirror phases and the
+Taskfile are this repo's own; the toolbox that runs them, its image and the two workflows
+this repository calls are [katoptra/lib](https://github.com/katoptra/lib)'s, at `v1`.
 
 ## 🧭 How it works
 
 One run is `task pipeline`, executed inside the toolbox image. Each step is one
-`python -m migrator <command>`; the Taskfile owns sequencing and the menu, the Python owns
-every decision. Steps before `inventory` run without a state database and are called
+`python -m migrator <command>`; the Taskfile owns sequencing, the Python owns every
+decision, and the toolbox from [katoptra/lib](https://github.com/katoptra/lib) owns the
+run around them: how it starts, is contained, resolves its secrets, is checked and is
+reported. Steps before `inventory` run without a state database and are called
 commands; the rest are phases and record their evidence in the state.
 
 | Step | What it does |
@@ -55,7 +58,11 @@ commands; the rest are phases and record their evidence in the state.
 | `trash` | Only when every planned batch landed: groups deleted rows by parent folder, one listing and one `filesystem trash` per folder. A folder that cannot be listed is recorded and retried the next run. |
 | `reconcile` | On the first run of the configured weekday, or with `RECONCILE=true`: a full Proton walk, `proton.walk_workers` CLI listings in flight, every folder below the root addressed by UID so the CLI resolves it in one lookup, children queued to the worker that listed their parent so its decrypted keys are already cached. Each worker runs from its own copy of the CLI session, because a rejected token refresh signs a copy out; the copy a refresh rewrote is adopted and the others re-seeded. The walk compares Proton's own listed size and SHA-1 against `mirror_objects`: rows Proton lacks, mis-sizes or mismatches are dropped so they re-upload; Proton nodes under the destination that neither Dropbox nor the state knows are trashed, and so are folders Dropbox no longer has once nothing on record is left under them (topmost only; a folder's trash takes its subtree). A walk that does not fit one run's budget resumes where it stopped on the next reconcile run, and a partial walk drops and trashes nothing. |
 | `report` | Builds the step summary from the state alone, finishes the run row, writes the chain marker, pushes the state, and returns the run status so a failed run stops before the success ping. |
-| `ping` | Pings healthchecks.io; the workflow pings `/fail` instead when anything failed. |
+| `ping` | Pings healthchecks.io; `task sync` pings `/fail` instead when anything failed. |
+
+Between the migrator's `report` and `ping` runs the toolbox's own `report`, which puts its
+rows on the job page (when the run started and how long it took, the image, whether the
+next run is queued) and the migrator's report under them.
 
 Every step is plan-by-default. `batches`, `trash`, `reconcile`, `report` and `empty-trash`
 change anything only with `--apply`, which the Taskfile passes in `task pipeline` and never in
@@ -72,10 +79,10 @@ claimed.
 
 - **A container engine**, running: Apple `container` on macOS, or Docker. The Taskfile picks
   Apple `container` when its daemon is up, else Docker; override with `ENGINE=docker`.
-  Every command in this repo, tests included, runs inside the toolbox image built from
-  [docker/Dockerfile](docker/Dockerfile) and pinned by
-  [config/toolchain.lock.toml](config/toolchain.lock.toml) (Python, `proton-drive`,
-  `age`, go-task, all checksum-verified). Nothing else is installed on the host.
+  Every command in this repo, tests included, runs inside the toolbox image,
+  `ghcr.io/katoptra/toolbox:proton-v1` from [katoptra/lib](https://github.com/katoptra/lib)
+  (Python, `proton-drive`, `age`, go-task, every one checksum-pinned by that repository's
+  lock). Nothing else is installed on the host.
 - **[go-task](https://taskfile.dev/)**: `brew install go-task`.
 - **The 1Password CLI** `op`, signed in and unlocked, for anything that needs the vault on
   the laptop. Nothing from the vault touches disk: `task op -- <cmd>` wraps a command in
@@ -153,8 +160,9 @@ every CLI call, because its refresh token rotates.
 
 1. Turn telemetry off in Proton account settings.
 2. Install the macOS `proton-drive` CLI from https://proton.me/download/drive/cli at the
-   version pinned in `config/toolchain.lock.toml`. The session file format is tied to the
-   version; the Linux binary in the toolbox must be able to read what the laptop wrote.
+   version katoptra/lib's `toolchain.lock.toml` pins for the image. The session file
+   format is tied to the version; the Linux binary in the toolbox must be able to read
+   what the laptop wrote.
 3. Sign in, with the session written as plain files under `.run/pd` (the directory must be
    inside this repo, since only the repo is mounted into the toolbox; `.run/` is ignored by
    git and deleted by `task clean`):
@@ -207,9 +215,8 @@ under `.state/history/` after 30 days. Store `access_key_id`, `secret_access_key
 `endpoint` (`https://<account-id>.r2.cloudflarestorage.com`) and `bucket` as fields of
 vault item `r2`; `op.env` resolves them as `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`,
 `AWS_ENDPOINT_URL_S3` and `MIRROR_R2_BUCKET`, the names boto3's S3 client reads directly.
-`AWS_REGION=auto` is a literal `ENV` line in [docker/Dockerfile](docker/Dockerfile), not a
-vault value: R2 has one region, and `op run` masking the word `auto` would corrupt
-ordinary output.
+`AWS_REGION=auto` is a literal `ENV` line in the image, not a vault value: R2 has one
+region, and `op run` masking the word `auto` would corrupt ordinary output.
 
 ### 6. healthchecks.io
 
@@ -220,9 +227,9 @@ for a queued run plus a full one. Store the ping URL as field `url` of vault ite
 ### 7. Prove the read path
 
 ```bash
-task image     # builds the toolbox once; every later task reuses it
+task image     # pulls the toolbox image once; every later task reuses it
 task test      # the pytest suite, offline
-task render    # every pipeline command rendered, no network, no credentials
+task check     # every pipeline command rendered inside the image, diffed against render.txt
 task plan      # the real thing, read-only: lists Dropbox, fetches the state, prints the plan
 ```
 
@@ -236,11 +243,10 @@ Dispatch the `sync` workflow once from the Actions tab or with
 tree as the delta, and chains itself run after run until the tree is mirrored: each run
 stops starting batches at its budget, checkpoints what landed, and queues the next run,
 which picks up from the state in R2. Each run's step summary shows percent mirrored and
-projected runs remaining. The first run also builds the toolbox image on the runner,
-which takes a few minutes before any step logs.
+projected runs remaining.
 
 The default budget is 335 minutes under a 355-minute job timeout, just under GitHub's
-six-hour limit for one job: every run pays one image build, one Dropbox listing and one
+six-hour limit for one job: every run pays one image pull, one Dropbox listing and one
 unused tail of up to a batch, so fewer, longer runs waste less. The 20-minute gap leaves
 the last batch's upload and the report room to finish.
 Actions minutes on a public repository are free, so the seed can run on Actions alone.
@@ -281,15 +287,16 @@ running.
 task test      # pytest inside the toolbox
 task lint      # ruff check and format check
 task fmt       # ruff format
-task render    # dry-run the whole pipeline: every command, no network
+task check     # render every pipeline command inside the image, diff against render.txt
+task render-update   # accept the current render as render.txt
 ```
 
 #### Write: changes Proton Drive and the state in R2
 
 ```bash
 task sync                          # one budgeted run, the same thing CI runs
-RUN_BUDGET_MIN=30 task sync        # with a shorter budget
-RECONCILE=true task sync           # force the weekly Proton walk (the literal word true)
+task sync -- RUN_BUDGET_MIN=30     # with a shorter budget
+task sync -- RECONCILE=true        # force the weekly Proton walk (the literal word true)
 task empty-trash                   # permanently delete Proton trash; asks first; never scheduled
 task state-rollback                # list the dated history objects in R2
 task state-rollback -- <key>       # copy one of them over the canonical state
@@ -303,36 +310,42 @@ loser's copy dies, and the next run needs a fresh login.
 #### Toolbox
 
 ```bash
-task image              # build the toolbox image (no-op while it exists)
-task image-clean        # remove it so the next task rebuilds
+task image              # pull the toolbox image (no-op while it exists)
+task image-build        # build it from a local katoptra/lib checkout instead (LIB_DIR=../lib)
+task image-clean        # remove it so the next task pulls again
 task clean              # delete .run, the caches and every other file git ignores
 task run -- <cmd>       # any command in the toolbox with the repo at /work
 task op -- <cmd>        # the same with secrets from 1Password via op.env
 ```
 
 `task clean` is `git clean -fdX`: it removes only files git already ignores, so the
-decrypted state, a laptop Proton session under `.run/pd`, staging, caches and stray
-lockfiles go, and nothing tracked or unignored is touched.
+decrypted state, a laptop Proton session under `.run/pd`, staging, the caches, the
+toolbox include under `.task/` and stray lockfiles go, and nothing tracked or unignored
+is touched.
 
 ## ⚙️ GitHub Actions
 
-[sync.yml](.github/workflows/sync.yml) is dispatch-only. Inputs: `reconcile` (force the
-Proton walk) and `budget_minutes` (override the run budget). `concurrency: {group: sync,
-cancel-in-progress: false}` is what queues a chained or scheduled run behind a running
-one; overlap would kill the Proton session. `timeout-minutes: 355` against a default budget
-of 335 leaves the last batch's upload and the report room to finish. The job uses one
-third-party action, SHA-pinned `actions/checkout`; it installs go-task and the 1Password
-CLI at the versions and checksums in `config/toolchain.lock.toml`, and every step that
-needs the vault runs `task op`, the same `op run --env-file=op.env` wrapper the laptop
-uses, with `OP_SERVICE_ACCOUNT_TOKEN` as the job's one secret. Everything else runs inside
-the toolbox. One `always()` step publishes `.run/report.md` as the step summary and pings `/fail`
-unless the job succeeded. When `report` left a `.run/chain` marker, a final step queues the
-next run with `gh workflow run`, which is the only reason the job has `actions: write`.
-Nothing else in this repo starts a run; the nightly dispatch comes from jshvn/dispatch.
+[sync.yml](.github/workflows/sync.yml) is dispatch-only and calls
+[katoptra/lib](https://github.com/katoptra/lib)'s reusable `sync.yml` at `v1`, which
+installs go-task and the 1Password CLI at the versions in lib's lock, pulls the image, and
+runs `task sync -- <vars>`. The one input, `vars`, carries `KEY=value` pairs for the
+pipeline: `gh workflow run sync.yml -f vars='RECONCILE=true RUN_BUDGET_MIN=30'`.
+`concurrency: {group: sync, cancel-in-progress: false}` is what queues a chained or
+scheduled run behind a running one; overlap would kill the Proton session.
+`timeout-minutes: 355` against a default budget of 335 leaves the last batch's upload and
+the report room to finish. `OP_SERVICE_ACCOUNT_TOKEN` is the repository's one secret,
+inherited by the called workflow; `task sync` runs the pipeline through `task op`, the
+same `op run --env-file=op.env` wrapper the laptop uses, and a pipeline that fails still
+reports and pings `/fail` inside that same container. When `report` left a `.run/chain`
+marker, the called workflow queues the next run with `gh workflow run`, which is the only
+reason the caller grants `actions: write`. Nothing else in this repo starts a run; the
+nightly dispatch comes from jshvn/dispatch.
 
-[check.yml](.github/workflows/check.yml) runs `task test`, `task lint` and `task render` on
-pull requests. It has no access to the vault, so a pull request from a fork can run it
-safely. GitHub registers it when the first pull request is opened.
+[check.yml](.github/workflows/check.yml) runs on pull requests: lib's reusable `check.yml`,
+which renders the pipeline inside the image and diffs it against [render.txt](render.txt),
+and a second job for `task test` and `task lint`. Neither has access to the vault, so a
+pull request from a fork can run it safely. GitHub registers it when the first pull
+request is opened.
 
 On a public repository the run logs and step summaries are public too. What they carry:
 phase lines, counts, retry warnings with the provider's error class, and the report
@@ -368,10 +381,12 @@ refused), `MIRROR_PROTON_DESTINATION` (the CLI path of the mirror root) and
 `MIRROR_PROTON_DESTINATION_UID` (its UID, verified on every run before any write) override
 the TOML keys `dropbox.expected_account_id`, `proton.destination` and
 `proton.expected_destination_uid`, which exist for a private fork that prefers a file.
-Run overrides: `RUN_BUDGET_MIN` and `RECONCILE=true`; `MIRROR_VERBOSE=1` to print an
-error's full text instead of its class; `MIRROR_WORK_DIR` (default `.run`) and
-`MIRROR_CONFIG` (default `config/mirror.toml`). The non-vault `AWS_REGION` literal is an
-`ENV` line in the Dockerfile so every process in the toolbox sees it.
+Run overrides go after the double dash, `task sync -- RUN_BUDGET_MIN=30 RECONCILE=true`,
+or in the workflow's `vars` input; the Taskfile maps them to the environment the migrator
+reads. `MIRROR_VERBOSE=1` in the environment prints an error's full text instead of its
+class; `MIRROR_WORK_DIR` (default `.run`) and `MIRROR_CONFIG` (default
+`config/mirror.toml`) are set by the Taskfile. The non-vault `AWS_REGION` literal is an
+`ENV` line in the image so every process in the toolbox sees it.
 
 ## 📊 Reading a run
 
@@ -445,7 +460,9 @@ is ignored by git.
   scheduled weekday or a run forced with `RECONCILE=true`, and finishes over as many runs
   as it needs.
 - **A flag such as `RUN_BUDGET_MIN` seems ignored.** The report's "budget minutes" row
-  shows what the run saw. `RECONCILE` takes the literal word `true`.
+  shows what the run saw. `RECONCILE` takes the literal word `true`. Both go after the
+  double dash, `task sync -- RUN_BUDGET_MIN=30`; before it they set a host-side task var
+  that never reaches the container.
 - **The report shows oversized files.** They are over `max_file_gb` or over what the
   runner's disk could stage, and percent mirrored stays short by their bytes. Upload them
   by hand to their Dropbox path under the destination: the reconcile walk leaves alone any
@@ -463,7 +480,8 @@ is ignored by git.
   folder and delete both the state object and everything under `.state/history/` before
   the switch.
 - **Move the runner.** The same image, Taskfile and `op.env` run anywhere with a container
-  engine and `op`: `task sync` is the whole job and the next cron tick is the chain.
+  engine, go-task and `op`: `task sync` is the whole job and the next cron tick is the
+  chain.
 
 ## 🔒 What sits where
 
@@ -475,7 +493,7 @@ workflow artifact is ever uploaded; the state, which holds every path name, is
 age-encrypted at rest; the Dropbox credentials cannot write, the R2 token reaches one
 bucket, and the service account reads one vault.
 
-What the public repository holds: code, the toolbox definition, the behavior config, and
+What the public repository holds: code, the Taskfile, the behavior config, and
 `op://` references made of a vault UUID and field names. What it does not hold: any
 credential, the Dropbox account id, the Proton folder path or UID, the bucket name or
 endpoint, the healthcheck URL, or any mirrored path name.
@@ -483,13 +501,14 @@ endpoint, the healthcheck URL, or any mirrored path name.
 ## 🗂️ Repository layout
 
 ```
-Taskfile.yml              the operator surface: menu, pipeline, toolbox, op wrapper
+Taskfile.yml              the mirror's own verbs around katoptra/lib's toolbox, included at v1
+.taskrc.yml               trusts raw.githubusercontent.com for the include; refetched hourly at most
+render.txt                the committed dry run of the pipeline; task check diffs against it
 op.env                    op:// references, committed; the one place vault names are listed for the laptop
 config/mirror.toml        the one behavior input; names no account
-config/toolchain.lock.toml  python image digest, proton-drive, age, go-task versions and checksums
-docker/Dockerfile         the toolbox image; the repo is bind-mounted at /work
 src/migrator/             the package: commands, phases/, providers/, state, store, crypt, session
 tests/                    pytest suite, no network; tests/fixtures/live/ is ignored by git
-.github/workflows/        sync.yml (dispatch-only, self-chaining), check.yml (pull requests)
+.github/workflows/        sync.yml and check.yml, callers of katoptra/lib's workflows at v1
 .run/                     work directory at run time; ignored by git, removed by task clean
+.task/                    the include cache; rides into the image, so a run needs no network
 ```

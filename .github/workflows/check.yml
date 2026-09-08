@@ -1,25 +1,14 @@
 name: check
-
-on:
-  pull_request:
-
-permissions:
-  contents: read
-
+on: {pull_request: {}}
+permissions: {contents: read}
 jobs:
   check:
+    uses: katoptra/lib/.github/workflows/check.yml@v1
+  tests:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Install go-task at the locked version
-        run: |
-          set -eu
-          version="$(python3 -c 'import tomllib; print(tomllib.load(open("config/toolchain.lock.toml","rb"))["task"]["version"])')"
-          sha="$(python3 -c 'import tomllib; print(tomllib.load(open("config/toolchain.lock.toml","rb"))["task"]["linux_amd64"]["sha256"])')"
-          curl -fsSL "https://github.com/go-task/task/releases/download/v${version}/task_linux_amd64.tar.gz" -o /tmp/task.tgz
-          echo "${sha}  /tmp/task.tgz" | sha256sum -c -
-          sudo tar -xzf /tmp/task.tgz -C /usr/local/bin task
+      - uses: katoptra/lib/.github/actions/toolbox@v1
       - run: task test
       - run: task lint
-      - run: task render

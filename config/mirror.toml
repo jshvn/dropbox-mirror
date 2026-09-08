@@ -23,7 +23,7 @@ batch_files = 2000
 # disk, the staging of one file needs the file plus disk_headroom_gb, and the state
 # and image share the same disk. The report counts what was left out.
 max_file_gb = 12
-# Just under GitHub's six-hour job limit: each run pays one image build, one Dropbox
+# Just under GitHub's six-hour job limit: each run pays one image pull, one Dropbox
 # listing and one unused tail of up to a batch, so fewer, longer runs waste less.
 # sync.yml's timeout-minutes must stay 20 minutes above this.
 run_budget_minutes = 335
