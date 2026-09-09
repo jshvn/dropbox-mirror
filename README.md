@@ -89,16 +89,16 @@ claimed.
   `op run --env-file=op.env`, which resolves the `op://` references in [op.env](op.env) at
   run time and masks their values in output.
 - **Accounts**: Dropbox, Proton Drive, a Cloudflare R2 bucket, a healthchecks.io check, and
-  a 1Password vault dedicated to this repo.
+  a 1Password vault.
 
 ## 🚀 First-time setup
 
 Every value that names an account is stored in exactly one place, the 1Password vault,
-and referenced in exactly one: [op.env](op.env), twelve `op://<vault>/<item>/<field>`
+and referenced in exactly one: [op.env](op.env), twelve `op://<vault>/dropbox/<section>/<field>`
 lines. The laptop and CI both run `op run --env-file=op.env`, so there is no second list
-to keep in step. The twelve references resolve five vault items:
+to keep in step. The twelve references resolve five sections of one vault item, `dropbox`:
 
-| Item | Fields | Reaches a run as |
+| Section | Fields | Reaches a run as |
 |---|---|---|
 | `dropbox` | `app_key`, `app_secret`, `refresh_token`, `account_id` | `MIRROR_DROPBOX_APP_KEY`, `MIRROR_DROPBOX_APP_SECRET`, `MIRROR_DROPBOX_REFRESH_TOKEN`, `MIRROR_DROPBOX_ACCOUNT_ID` |
 | `proton` | `destination`, `destination_uid` | `MIRROR_PROTON_DESTINATION`, `MIRROR_PROTON_DESTINATION_UID` |
@@ -108,13 +108,13 @@ to keep in step. The twelve references resolve five vault items:
 
 ### 1. 1Password
 
-Create a vault for this repo and a service account scoped to that vault alone. Store the
-service-account token in your personal vault (never in the vault it reads) and as the one
-GitHub repository secret, `OP_SERVICE_ACCOUNT_TOKEN`. Put the vault into the references
-in `op.env`, by name if the name has no slash (`op://katoptra-dropbox/...`), otherwise by
-UUID from `op vault get <name> --format json`: a secret reference has exactly three
-segments, so a slash in a vault name cannot be written. Neither the name nor the UUID is a
-secret: without the service-account token it opens nothing.
+This organization keeps one vault, `Katoptra`, with one item per mirror, and one service
+account that reads it, stored as the organization secret `OP_SERVICE_ACCOUNT_TOKEN`. A
+fork makes its own vault and service account and puts the token in a repository secret
+of the same name. The vault goes into the references in `op.env` by UUID, from
+`op vault get <name> --format json`: a reference is `op://<vault>/<item>/<section>/<field>`,
+so a slash in a vault name cannot be written, and a UUID survives a rename. Neither the
+name nor the UUID is a secret: without the service-account token it opens nothing.
 
 ### 2. Dropbox
 
