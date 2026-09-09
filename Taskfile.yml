@@ -6,7 +6,7 @@
 #
 # The toolbox, which starts a run, contains it in the image, resolves its secrets,
 # renders and checks it, reports it and pings healthchecks.io, is katoptra/lib's,
-# included below at v1 and flattened into this file. What is here is the mirror's
+# included below at v2 and flattened into this file. What is here is the mirror's
 # own: the pipeline in order, one migrator command a step beside the toolbox's clock,
 # report and ping, the operator verbs around it, and its part of the report.
 version: '3'
@@ -29,13 +29,13 @@ env:
 
 includes:
   toolbox:
-    taskfile: https://raw.githubusercontent.com/katoptra/lib/v1/toolbox.yml
+    taskfile: https://raw.githubusercontent.com/katoptra/lib/v2/toolbox.yml
     flatten: true
     excludes: [report-mirror]
     vars:
       NAME: dropbox
       DESC: nightly Dropbox -> Proton Drive mirror; R2 holds the state
-      IMAGE: ghcr.io/katoptra/toolbox:proton-v1
+      IMAGE: ghcr.io/katoptra/toolbox:proton-v2
       PASS: MIRROR_VERBOSE
       MENU: >-
         ""

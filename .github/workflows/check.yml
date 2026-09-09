@@ -8,7 +8,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: katoptra/lib/.github/actions/toolbox@04f7901cf1aa7551bc43db5ff801a225a189c42a # v1.0.2
+      - uses: katoptra/lib/.github/actions/toolbox@81fb6ee34abc7703087cfe4a303263febc912c6f # v2.0.0
       - run: task check
       - run: task test
       - run: task lint

@@ -30,7 +30,7 @@ and the official `proton-drive` CLI) come from
 [donphi/dropbox_proton](https://github.com/donphi/dropbox_proton) at commit `cfd0e57`,
 MIT, whose copyright notice is retained in [LICENSE](LICENSE). The mirror phases and the
 Taskfile are this repo's own; the toolbox that runs them, its image and the two workflows
-this repository calls are [katoptra/lib](https://github.com/katoptra/lib)'s, at `v1`.
+this repository calls are [katoptra/lib](https://github.com/katoptra/lib)'s, at `v2`.
 
 ## 🧭 How it works
 
@@ -80,7 +80,7 @@ claimed.
 - **A container engine**, running: Apple `container` on macOS, or Docker. The Taskfile picks
   Apple `container` when its daemon is up, else Docker; override with `ENGINE=docker`.
   Every command in this repo, tests included, runs inside the toolbox image,
-  `ghcr.io/katoptra/toolbox:proton-v1` from [katoptra/lib](https://github.com/katoptra/lib)
+  `ghcr.io/katoptra/toolbox:proton-v2` from [katoptra/lib](https://github.com/katoptra/lib)
   (Python, `proton-drive`, `age`, go-task, every one checksum-pinned by that repository's
   lock). Nothing else is installed on the host.
 - **[go-task](https://taskfile.dev/)**: `brew install go-task`.
@@ -326,7 +326,7 @@ is touched.
 ## ⚙️ GitHub Actions
 
 [sync.yml](.github/workflows/sync.yml) is dispatch-only and calls
-[katoptra/lib](https://github.com/katoptra/lib)'s reusable `sync.yml` at `v1`, which
+[katoptra/lib](https://github.com/katoptra/lib)'s reusable `sync.yml` at `v2`, which
 installs go-task and the 1Password CLI at the versions in lib's lock, pulls the image, and
 runs `task sync -- <vars>`. The one input, `vars`, carries `KEY=value` pairs for the
 pipeline: `gh workflow run sync.yml -f vars='RECONCILE=true RUN_BUDGET_MIN=30'`.
@@ -502,14 +502,14 @@ endpoint, the healthcheck URL, or any mirrored path name.
 ## 🗂️ Repository layout
 
 ```
-Taskfile.yml              the mirror's own verbs around katoptra/lib's toolbox, included at v1
+Taskfile.yml              the mirror's own verbs around katoptra/lib's toolbox, included at v2
 .taskrc.yml               trusts raw.githubusercontent.com for the include; refetched hourly at most
 render.txt                the committed dry run of the pipeline; task check diffs against it
 op.env                    op:// references, committed; the one place vault names are listed for the laptop
 config/mirror.toml        the one behavior input; names no account
 src/migrator/             the package: commands, phases/, providers/, state, store, crypt, session
 tests/                    pytest suite, no network; tests/fixtures/live/ is ignored by git
-.github/workflows/        sync.yml and check.yml, callers of katoptra/lib's workflows at v1
+.github/workflows/        sync.yml and check.yml, callers of katoptra/lib's workflows at v2
 .run/                     work directory at run time; ignored by git, removed by task clean
 .task/                    the include cache; rides into the image, so a run needs no network
 ```
