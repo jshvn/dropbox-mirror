@@ -5,11 +5,10 @@
 # reach processes by name from 1Password (op.env); nothing is written to disk.
 #
 # The toolbox, which starts a run, contains it in the image, resolves its secrets,
-# renders and checks it and reports it, is katoptra/lib's, included below at v1 and
-# flattened into this file. What is here is the mirror's own: the pipeline in order,
-# one migrator command a step, the operator verbs around it, and its part of the
-# report. The migrator keeps its own clock and its own pings, so those three verbs
-# are excluded from the include and defined here.
+# renders and checks it, reports it and pings healthchecks.io, is katoptra/lib's,
+# included below at v2 and flattened into this file. What is here is the mirror's
+# own: the pipeline in order, one migrator command a step beside the toolbox's clock,
+# report and ping, the operator verbs around it, and its part of the report.
 version: '3'
 
 vars:
@@ -19,25 +18,24 @@ vars:
 # Run-scoped environment for every migrator command. RECONCILE and RUN_BUDGET_MIN are
 # task vars a run sets after the double dash (task sync -- RECONCILE=true
 # RUN_BUDGET_MIN=30, or the workflow's vars input), mapped to the names the migrator
-# reads; unset, they render empty, which it reads as unset. AWS_REGION is an ENV line
-# in the image, so every in-toolbox command sees it.
+# reads; unset, they render empty, which it reads as unset. The migrator's work
+# directory and config path are its own defaults, .run and config/mirror.toml, and
+# AWS_REGION is an ENV line in the image, so every in-toolbox command sees it.
 env:
   MIRROR_RUN_EPOCH: '{{.RUN_EPOCH}}'
-  MIRROR_WORK_DIR: .run
-  MIRROR_CONFIG: config/mirror.toml
-  RECONCILE: '{{.RECONCILE | default ""}}'
-  RUN_BUDGET_MIN: '{{.RUN_BUDGET_MIN | default ""}}'
+  RECONCILE: '{{.RECONCILE}}'
+  RUN_BUDGET_MIN: '{{.RUN_BUDGET_MIN}}'
   PROTON_DRIVE_LOG_LEVEL: INFO   # the Proton CLI's own log level; its lines reach the public job log
 
 includes:
   toolbox:
-    taskfile: https://raw.githubusercontent.com/katoptra/lib/v1/toolbox.yml
+    taskfile: https://raw.githubusercontent.com/katoptra/lib/v2/toolbox.yml
     flatten: true
-    excludes: [clock, ping, ping-fail, report-mirror]
+    excludes: [report-mirror]
     vars:
       NAME: dropbox
       DESC: nightly Dropbox -> Proton Drive mirror; R2 holds the state
-      IMAGE: ghcr.io/katoptra/toolbox:proton-v1
+      IMAGE: ghcr.io/katoptra/toolbox:proton-v2
       PASS: MIRROR_VERBOSE
       MENU: >-
         ""
@@ -63,6 +61,7 @@ tasks:
     desc: The full budgeted run, inside the toolbox
     cmds:
       - task: clock
+      - task: clock-phase
       - task: session
       - task: state
       - task: inventory
@@ -79,19 +78,18 @@ tasks:
     desc: Read-only half of the pipeline, inside the toolbox; prints the report it would make
     cmds:
       - task: clock
+      - task: clock-phase
       - task: session
       - task: state
       - task: inventory
       - task: delta
       - task: plan-phase
       - python -m migrator report   # no --apply: a read-only plan pushes nothing to R2
-      - cat .run/report.md
+      - cat {{.RUN}}/report.md
 
-  clock:
-    internal: true
-    cmds:
-      - python -m migrator clock
-      - date -u '+%s %H %u' > .run/start.txt   # the toolbox's report reads it for its Started row
+  # The migrator's own stamp, after the toolbox's clock: its start epoch, hour and weekday
+  # to .run/clock.json, and a clean staging, report and chain marker.
+  clock-phase: { internal: true, cmds: ['python -m migrator clock'] }
   session:    { internal: true, cmds: ['python -m migrator session'] }
   state:      { internal: true, cmds: ['python -m migrator state'] }
   inventory:  { internal: true, cmds: ['python -m migrator inventory'] }
@@ -102,26 +100,24 @@ tasks:
   reconcile:  { internal: true, cmds: ['python -m migrator --apply reconcile'] }
   # Builds .run/report.md from the state, closes the run row, writes the chain marker.
   report-phase: { internal: true, cmds: ['python -m migrator --apply report'] }
-  ping:         { internal: true, cmds: ['python -m migrator ping'] }
-  # Not internal: the toolbox's sync runs it from the command line after a failed pipeline.
-  ping-fail:    { cmds: ['python -m migrator ping fail'] }
   empty-trash-pipeline:
     internal: true
     cmds:
       - task: clock
+      - task: clock-phase
       - task: session
       - task: state
       - python -m migrator --apply empty-trash
 
   # The toolbox's report calls this after its own rows: at the end of the pipeline, and
-  # from sync's failure path after one that died anywhere. A run that died before its
+  # from the failure path after a run that died anywhere. A run that died before its
   # report phase gets one now, closing the run row; then the report goes on the job page
   # under the toolbox's rows.
   report-mirror:
     internal: true
     cmds:
-      - test -f .run/report.md || python -m migrator --apply report || true
-      - test ! -f .run/report.md || cat .run/report.md >> "${GITHUB_STEP_SUMMARY:-/dev/stdout}"
+      - test -f {{.RUN}}/report.md || python -m migrator --apply report || true
+      - test ! -f {{.RUN}}/report.md || cat {{.RUN}}/report.md >> "${GITHUB_STEP_SUMMARY:-/dev/stdout}"
 
   # ---- read ----
   status:

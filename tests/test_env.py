@@ -9,7 +9,6 @@ from migrator.env import Runtime
 BASE = {
     "MIRROR_R2_BUCKET": "b",
     "MIRROR_AGE_IDENTITY": "AGE-SECRET-KEY-1TEST",
-    "MIRROR_HEALTHCHECK_URL": "https://hc/ping/x",
     "MIRROR_DROPBOX_APP_KEY": "k",
     "MIRROR_DROPBOX_APP_SECRET": "s",
     "MIRROR_DROPBOX_REFRESH_TOKEN": "r",
@@ -28,7 +27,6 @@ def test_defaults_and_secrets():
     assert runtime.reconcile is False
     assert set(runtime.secrets()) == {
         "AGE-SECRET-KEY-1TEST",
-        "https://hc/ping/x",
         "s",
         "r",
         "ak",

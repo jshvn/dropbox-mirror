@@ -93,15 +93,6 @@ def test_is_reconcile_run_is_first_run_of_the_weekday(state_context):
     )
 
 
-def test_ping_hits_fail_suffix(runtime_factory, tmp_path, monkeypatch):
-    runtime = runtime_factory(tmp_path)
-    seen = []
-    monkeypatch.setattr(commands, "_http_get", lambda url: seen.append(url))
-    assert commands.ping(runtime, []) == 0
-    assert commands.ping(runtime, ["fail"]) == 0
-    assert seen == ["https://hc.example/ping/x", "https://hc.example/ping/x/fail"]
-
-
 def test_status_prints_counts_only(state_context, capsys, monkeypatch):
     cfg, _paths, state, _, runtime = state_context
     monkeypatch.setattr(commands, "load_config", lambda _: cfg)

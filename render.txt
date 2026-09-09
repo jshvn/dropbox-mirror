@@ -1,5 +1,5 @@
-task: [clock] python -m migrator clock
-task: [clock] date -u '+%s %H %u' > .run/start.txt
+task: [clock] mkdir -p /work/.run && rm -f /work/.run/chain && date -u '+%s %H %u' > /work/.run/start.txt
+task: [clock-phase] python -m migrator clock
 task: [session] python -m migrator session
 task: [state] python -m migrator state
 task: [inventory] python -m migrator inventory
@@ -9,6 +9,6 @@ task: [batches] python -m migrator --apply batches
 task: [trash] python -m migrator --apply trash
 task: [reconcile] python -m migrator --apply reconcile
 task: [report-phase] python -m migrator --apply report
-task: [report-mirror] test -f .run/report.md || python -m migrator --apply report || true
-task: [report-mirror] test ! -f .run/report.md || cat .run/report.md >> "${GITHUB_STEP_SUMMARY:-/dev/stdout}"
-task: [ping] python -m migrator ping
+task: [report-mirror] test -f /work/.run/report.md || python -m migrator --apply report || true
+task: [report-mirror] test ! -f /work/.run/report.md || cat /work/.run/report.md >> "${GITHUB_STEP_SUMMARY:-/dev/stdout}"
+task: [ping] test -z "$HEALTHCHECK_URL" || curl -fsS -m 10 --retry 3 -o /dev/null "$HEALTHCHECK_URL"

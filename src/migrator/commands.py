@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import shutil
-import urllib.request
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -98,29 +97,6 @@ def state(runtime: Runtime, args: list[str]) -> int:
     finally:
         db.close()
     print(f"state: {outcome}; run {run_id}; mirrored files={files} bytes={size}")
-    return 0
-
-
-def _http_get(url: str) -> None:
-    with urllib.request.urlopen(
-        url, timeout=10
-    ) as response:  # fixed https URL from config
-        response.read()
-
-
-def ping(runtime: Runtime, args: list[str]) -> int:
-    if not runtime.healthcheck_url:
-        print("ping: MIRROR_HEALTHCHECK_URL unset; skipped")
-        return 0
-    # A bare word, not a flag: the command's `args` positional rejects anything starting "--".
-    url = runtime.healthcheck_url.rstrip("/") + ("/fail" if "fail" in args else "")
-    for _attempt in range(3):
-        try:
-            _http_get(url)
-            return 0
-        except OSError:
-            continue
-    print("ping: healthchecks.io unreachable after 3 attempts")
     return 0
 
 
