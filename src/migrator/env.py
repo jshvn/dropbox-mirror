@@ -27,7 +27,6 @@ class Runtime:
     verbose: bool
     r2_bucket: str
     age_identity: str
-    healthcheck_url: str
     dropbox_app_key: str
     dropbox_app_secret: str
     dropbox_refresh_token: str
@@ -51,7 +50,6 @@ class Runtime:
             verbose=env.get("MIRROR_VERBOSE", "") == "1",
             r2_bucket=env.get("MIRROR_R2_BUCKET", ""),
             age_identity=env.get("MIRROR_AGE_IDENTITY", ""),
-            healthcheck_url=env.get("MIRROR_HEALTHCHECK_URL", ""),
             dropbox_app_key=env.get("MIRROR_DROPBOX_APP_KEY", ""),
             dropbox_app_secret=env.get("MIRROR_DROPBOX_APP_SECRET", ""),
             dropbox_refresh_token=env.get("MIRROR_DROPBOX_REFRESH_TOKEN", ""),
@@ -68,7 +66,6 @@ class Runtime:
         identifiers that name the accounts (the repo and its logs are public)."""
         values = (
             self.age_identity,
-            self.healthcheck_url,
             self.dropbox_app_secret,
             self.dropbox_refresh_token,
             self.aws_access_key_id,

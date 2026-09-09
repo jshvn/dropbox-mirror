@@ -43,7 +43,7 @@ commands; the rest are phases and record their evidence in the state.
 
 | Step | What it does |
 |---|---|
-| `clock` | Stamps the run start epoch, UTC hour and weekday to `.run/clock.json`; clears `staging/`, the report and the chain marker. |
+| `clock` | The toolbox's stamp to `.run/start.txt`, then the migrator's own (`clock-phase`): the run start epoch, UTC hour and weekday to `.run/clock.json`; clears `staging/`, the report and the chain marker. |
 | `session` | Fetches `.state/session.tar.age` from R2, decrypts it with the age identity, unpacks it to `.run/session/`, which is `PROTON_DRIVE_CACHE_DIR` for every later Proton call. |
 | `state` | Fetches `.state/state.sqlite.xz.age` and starts the run row. A missing state is accepted as an empty mirror only when `.state/history/` is empty too and the bucket answers a probe; a missing state beside history is refused, because a lost state must never look like an empty mirror. |
 | `inventory` | Recursive Dropbox `files/list_folder` walk, each page committed with its cursor. Entries with no `content_hash` (Paper docs, cloud files) are recorded as non-downloadable and excluded. Rebuilds every entry's display path from its ancestor folders' own names, because Dropbox cases the parent segments of `path_display` inconsistently between entries of one folder; that rebuilt path is what staging and Proton see, and the lowercased path stays the key. Keeps only the newest listing and drops each entry's raw API JSON once the walk is complete, since nothing reads either and every checkpoint ships the state to R2. |
@@ -58,9 +58,9 @@ commands; the rest are phases and record their evidence in the state.
 | `trash` | Only when every planned batch landed: groups deleted rows by parent folder, one listing and one `filesystem trash` per folder. A folder that cannot be listed is recorded and retried the next run. |
 | `reconcile` | On the first run of the configured weekday, or with `RECONCILE=true`: a full Proton walk, `proton.walk_workers` CLI listings in flight, every folder below the root addressed by UID so the CLI resolves it in one lookup, children queued to the worker that listed their parent so its decrypted keys are already cached. Each worker runs from its own copy of the CLI session, because a rejected token refresh signs a copy out; the copy a refresh rewrote is adopted and the others re-seeded. The walk compares Proton's own listed size and SHA-1 against `mirror_objects`: rows Proton lacks, mis-sizes or mismatches are dropped so they re-upload; Proton nodes under the destination that neither Dropbox nor the state knows are trashed, and so are folders Dropbox no longer has once nothing on record is left under them (topmost only; a folder's trash takes its subtree). A walk that does not fit one run's budget resumes where it stopped on the next reconcile run, and a partial walk drops and trashes nothing. |
 | `report` | Builds the step summary from the state alone, finishes the run row, writes the chain marker, pushes the state, and returns the run status so a failed run stops before the success ping. |
-| `ping` | Pings healthchecks.io; `task sync` pings `/fail` instead when anything failed. |
+| `ping` | The toolbox's: pings `HEALTHCHECK_URL`; a failed run pings `/fail` instead, from the toolbox's failure path. |
 
-Between the migrator's `report` and `ping` runs the toolbox's own `report`, which puts its
+Between the migrator's `report` and the toolbox's `ping` runs the toolbox's own `report`, which puts its
 rows on the job page (when the run started and how long it took, the image, whether the
 next run is queued) and the migrator's report under them.
 
@@ -104,7 +104,7 @@ to keep in step. The twelve references resolve five vault items:
 | `proton` | `destination`, `destination_uid` | `MIRROR_PROTON_DESTINATION`, `MIRROR_PROTON_DESTINATION_UID` |
 | `r2` | `access_key_id`, `secret_access_key`, `endpoint`, `bucket` | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_ENDPOINT_URL_S3`, `MIRROR_R2_BUCKET` |
 | `age` | `identity` | `MIRROR_AGE_IDENTITY` |
-| `healthcheck` | `url` | `MIRROR_HEALTHCHECK_URL` |
+| `healthcheck` | `url` | `HEALTHCHECK_URL` |
 
 ### 1. 1Password
 
@@ -336,7 +336,8 @@ scheduled run behind a running one; overlap would kill the Proton session.
 the report room to finish. `OP_SERVICE_ACCOUNT_TOKEN` is the repository's one secret,
 inherited by the called workflow; `task sync` runs the pipeline through `task op`, the
 same `op run --env-file=op.env` wrapper the laptop uses, and a pipeline that fails still
-reports and pings `/fail` inside that same container. When `report` left a `.run/chain`
+reports and pings `/fail` inside that same container, and a run the runner cut off (the
+timeout, a cancellation) gets the same from the workflow. When `report` left a `.run/chain`
 marker, the called workflow queues the next run with `gh workflow run`, which is the only
 reason the caller grants `actions: write`. Nothing else in this repo starts a run; the
 nightly dispatch comes from jshvn/dispatch.

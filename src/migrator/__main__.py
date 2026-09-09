@@ -11,7 +11,6 @@ COMMANDS = {
     "clock": commands.clock,
     "session": commands.session_restore,
     "state": commands.state,
-    "ping": commands.ping,
     "status": commands.status,
     "state-push": commands.state_push,
     "state-rollback": commands.state_rollback,

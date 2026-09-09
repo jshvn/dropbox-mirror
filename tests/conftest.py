@@ -18,7 +18,6 @@ from migrator.state import State
 TEST_ENV = {
     "MIRROR_R2_BUCKET": "test-bucket",
     "MIRROR_AGE_IDENTITY": "AGE-SECRET-KEY-1TEST",
-    "MIRROR_HEALTHCHECK_URL": "https://hc.example/ping/x",
     "MIRROR_DROPBOX_APP_KEY": "app-key",
     "MIRROR_DROPBOX_APP_SECRET": "app-secret",
     "MIRROR_DROPBOX_REFRESH_TOKEN": "refresh-token",
