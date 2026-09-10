@@ -99,7 +99,7 @@ The bucket holds the state and the session, nothing of the mirrored tree.
 |---|---|
 | An R2 bucket, or any S3-compatible bucket | The state and the session |
 | An API token with Object Read & Write, scoped to that bucket | The `r2` values in step 3 |
-| A lifecycle rule expiring `.state/history/` after 30 days | The bucket has no object versioning; the dated copies are the rollback |
+| A lifecycle rule expiring `.state/history/` after 7 days | The bucket has no object versioning; the dated copies are the rollback |
 
 The state holds every mirrored path name, which is why it is encrypted. What the toolbox
 and the engines keep in a bucket: [lib, Storage](https://github.com/katoptra/lib#storage).
