@@ -1,515 +1,269 @@
-## 🪞 dropbox
+# dropbox
 
-A self-chaining GitHub Actions pipeline that mirrors a Dropbox account into Proton Drive.
-After each run Proton Drive holds what Dropbox held at listing time, under one folder of
-your choosing. Changed files become new Proton revisions, files that left Dropbox move to
-Proton's trash, and nothing is recorded as mirrored until Proton's own upload summary has
-accounted for it. The only durable state is one SQLite database, age-encrypted in a
-Cloudflare R2 bucket; no run is ever told where to start.
+[![sync](https://github.com/katoptra/dropbox/actions/workflows/sync.yml/badge.svg)](https://github.com/katoptra/dropbox/actions/workflows/sync.yml)
+[![license](https://img.shields.io/github/license/katoptra/dropbox)](LICENSE)
 
-Dropbox stays the primary. Nothing written in Proton Drive flows back.
-
-```
-Dropbox (primary, read-only credentials)
-  -> GitHub Actions run (this repo, inside one pinned toolbox image)
-       inventory -> delta -> plan -> per batch: fetch -> verify -> upload -> confirm -> checkpoint
-       -> trash -> reconcile (weekly) -> report -> ping -> chain if batches remain
-  -> Proton Drive <destination folder>   (Proton's version history is the cloud-side history)
-  -> R2 .state/                          (encrypted state database, dated history, CLI session)
-```
+A nightly, self-chaining mirror of a Dropbox account into one Proton Drive folder. After
+each run Proton Drive holds what Dropbox held at listing time. Changed files become new
+Proton revisions, files that left Dropbox move to Proton's trash, and nothing is recorded
+as mirrored until Proton's own upload summary has accounted for it. The only durable
+state is one SQLite database, age-encrypted in a bucket; no run is ever told where to
+start. Dropbox stays the primary; nothing written in Proton Drive flows back.
 
 The repository is public and holds no account: every credential and every account
-identifier (the Dropbox account id, the Proton destination folder and its UID) lives in
-one 1Password vault and reaches a run by name.
-
-### Provenance
-
-The infrastructure modules under `src/migrator/` (SQLite evidence schema, one-pass hasher,
-atomic writes, redacting logger, path guards, and the two providers for the Dropbox API
-and the official `proton-drive` CLI) come from
+identifier lives in one vault and reaches a run by name. The infrastructure modules under
+`src/migrator/` (the SQLite evidence schema, the one-pass hasher, atomic writes, the
+redacting logger, path guards, and the two providers for the Dropbox API and the
+`proton-drive` CLI) come from
 [donphi/dropbox_proton](https://github.com/donphi/dropbox_proton) at commit `cfd0e57`,
 MIT, whose copyright notice is retained in [LICENSE](LICENSE). The mirror phases and the
-Taskfile are this repo's own; the toolbox that runs them, its image and the two workflows
-this repository calls are [katoptra/lib](https://github.com/katoptra/lib)'s, at `v2`.
+Taskfile are this repository's own.
 
-## 🧭 How it works
+## How to use
 
-One run is `task pipeline`, executed inside the toolbox image. Each step is one
-`python -m migrator <command>`; the Taskfile owns sequencing, the Python owns every
-decision, and the toolbox from [katoptra/lib](https://github.com/katoptra/lib) owns the
-run around them: how it starts, is contained, resolves its secrets, is checked and is
-reported. Steps before `inventory` run without a state database and are called
-commands; the rest are phases and record their evidence in the state.
+The files are under the destination folder in Proton Drive, at their Dropbox paths and
+with Dropbox's casing. An edit in Dropbox is a new revision in Proton the next morning;
+a delete is in Proton's trash; a file too large for the runner to stage is counted as
+oversized in the run's report and can be uploaded by hand to its Dropbox path, where the
+weekly walk leaves it alone.
 
-| Step | What it does |
-|---|---|
-| `clock` | The toolbox's stamp to `.run/start.txt`, then the migrator's own (`clock-phase`): the run start epoch, UTC hour and weekday to `.run/clock.json`; clears `staging/`, the report and the chain marker. |
-| `session` | Fetches `.state/session.tar.age` from R2, decrypts it with the age identity, unpacks it to `.run/session/`, which is `PROTON_DRIVE_CACHE_DIR` for every later Proton call. |
-| `state` | Fetches `.state/state.sqlite.xz.age` and starts the run row. A missing state is accepted as an empty mirror only when `.state/history/` is empty too and the bucket answers a probe; a missing state beside history is refused, because a lost state must never look like an empty mirror. |
-| `inventory` | Recursive Dropbox `files/list_folder` walk, each page committed with its cursor. Entries with no `content_hash` (Paper docs, cloud files) are recorded as non-downloadable and excluded. Rebuilds every entry's display path from its ancestor folders' own names, because Dropbox cases the parent segments of `path_display` inconsistently between entries of one folder; that rebuilt path is what staging and Proton see, and the lowercased path stays the key. Keeps only the newest listing and drops each entry's raw API JSON once the walk is complete, since nothing reads either and every checkpoint ships the state to R2. |
-| `delta` | Compares the inventory against `mirror_objects` on `(path_lower, size, content_hash)`; this run's delta replaces every earlier run's. Refuses a listing under half the mirrored file count so a truncated listing can never become a trash list. |
-| `plan` | Refuses a tree over `ceiling_gb` or a batch the runner's disk cannot hold in staging. Leaves out any file over `max_file_gb`, or over what the disk can stage beside its headroom, and counts it as oversized in the report; a file that would fail its batch must not stop the chain. Packs the rest into batches of at most `batch_gb` and `batch_files`, a file over `batch_gb` being a batch by itself. Earlier PLANNED batches are dropped; this run's plan is the only plan. |
-| `batches` | Touches the Proton session once with a listing of the destination's parent, then runs each batch through the five steps below. Before each batch it stops when the elapsed time plus the longest batch so far would pass the budget; stopping with batches left is a success that marks the run for chaining. |
-| `fetch` | Empties staging and downloads the batch from Dropbox over the API by listed path, `download_workers` files in flight, each file landing under its display path so Proton receives Dropbox's casing. A path that vanished since listing is counted and skipped. |
-| `verify` | Recomputes every staged file's Dropbox content hash and records SHA-1 and SHA-256. A mismatch is a file edited between listing and fetch: removed, counted, never recorded. A batch where every file mismatches fails. |
-| `upload` | One `proton-drive filesystem upload` of the staging tree with `-f create-new-revision -d merge --skip-thumbnails`; Proton skips files whose content it already holds. |
-| `confirm` | Reads the upload summary: transferred, skipped and failed items must account for every verified file plus every folder, and every failure must name a file in the batch. Those files alone are recorded as failed, with the CLI's error text, and the rest confirm; a failure that names nothing in the batch, or counts that do not add up, leave the whole batch unrecorded. Proton's server verifies every ciphertext block hash at upload; the weekly reconcile walk is the independent observation of what Proton holds. |
-| `checkpoint` | Merges the confirmed rows into `mirror_objects` and pushes the state to R2 under `.state/history/<epoch>-<batch>` and then, server-side, to the canonical key. A batch with failed files still checkpoints what confirmed; those files are absent from `mirror_objects`, so the next run's delta lists them again. Only a batch that recorded nothing fails the run. Always the last step of a batch, so a killed run repeats at most one batch. |
-| `trash` | Only when every planned batch landed: groups deleted rows by parent folder, one listing and one `filesystem trash` per folder. A folder that cannot be listed is recorded and retried the next run. |
-| `reconcile` | On the first run of the configured weekday, or with `RECONCILE=true`: a full Proton walk, `proton.walk_workers` CLI listings in flight, every folder below the root addressed by UID so the CLI resolves it in one lookup, children queued to the worker that listed their parent so its decrypted keys are already cached. Each worker runs from its own copy of the CLI session, because a rejected token refresh signs a copy out; the copy a refresh rewrote is adopted and the others re-seeded. The walk compares Proton's own listed size and SHA-1 against `mirror_objects`: rows Proton lacks, mis-sizes or mismatches are dropped so they re-upload; Proton nodes under the destination that neither Dropbox nor the state knows are trashed, and so are folders Dropbox no longer has once nothing on record is left under them (topmost only; a folder's trash takes its subtree). A walk that does not fit one run's budget resumes where it stopped on the next reconcile run, and a partial walk drops and trashes nothing. |
-| `report` | Builds the step summary from the state alone, finishes the run row, writes the chain marker, pushes the state, and returns the run status so a failed run stops before the success ping. |
-| `ping` | The toolbox's: pings `HEALTHCHECK_URL`; a failed run pings `/fail` instead, from the toolbox's failure path. |
+## How it works
 
-Between the migrator's `report` and the toolbox's `ping` runs the toolbox's own `report`, which puts its
-rows on the job page (when the run started and how long it took, the image, whether the
-next run is queued) and the migrator's report under them.
+Once a night a GitHub Actions job runs this pipeline inside the toolbox image from
+[katoptra/lib](https://github.com/katoptra/lib). The toolbox's own verbs are the solid
+boxes; every dashed box is one `python -m migrator <command>`. This mirror includes the
+toolbox alone and supplies its own pipeline: the Taskfile owns the order, the Python
+owns every decision.
 
-Every step is plan-by-default. `batches`, `trash`, `reconcile`, `report` and `empty-trash`
-change anything only with `--apply`, which the Taskfile passes in `task pipeline` and never in
-`task plan-pipeline`. No mutation is trusted on its exit status: the state push is trusted
-only once the object lands, and nothing is recorded as uploaded on a command's exit code
-alone. The evidence has three layers: the upload summary per batch (transferred, skipped
-and failed items matched against what was verified, each failure named); Proton's own
-server-side block hashes, checked at upload time and out of this repo's hands; and the
-weekly reconcile walk, which compares Proton's own listing, its size and SHA-1 for every
-node under the destination, against `mirror_objects`, independent of anything a batch
-claimed.
-
-## 🛠️ Prerequisites
-
-- **A container engine**, running: Apple `container` on macOS, or Docker. The Taskfile picks
-  Apple `container` when its daemon is up, else Docker; override with `ENGINE=docker`.
-  Every command in this repo, tests included, runs inside the toolbox image,
-  `ghcr.io/katoptra/toolbox:proton-v2` from [katoptra/lib](https://github.com/katoptra/lib)
-  (Python, `proton-drive`, `age`, go-task, every one checksum-pinned by that repository's
-  lock). Nothing else is installed on the host.
-- **[go-task](https://taskfile.dev/)**: `brew install go-task`.
-- **The 1Password CLI** `op`, signed in and unlocked, for anything that needs the vault on
-  the laptop. Nothing from the vault touches disk: `task op -- <cmd>` wraps a command in
-  `op run --env-file=op.env`, which resolves the `op://` references in [op.env](op.env) at
-  run time and masks their values in output.
-- **Accounts**: Dropbox, Proton Drive, a Cloudflare R2 bucket, a healthchecks.io check, and
-  a 1Password vault.
-
-## 🚀 First-time setup
-
-Every value that names an account is stored in exactly one place, the 1Password vault,
-and referenced in exactly one: [op.env](op.env), twelve `op://<vault>/dropbox/<section>/<field>`
-lines. The laptop and CI both run `op run --env-file=op.env`, so there is no second list
-to keep in step. The twelve references resolve five sections of one vault item, `dropbox`:
-
-| Section | Fields | Reaches a run as |
-|---|---|---|
-| `dropbox` | `app_key`, `app_secret`, `refresh_token`, `account_id` | `MIRROR_DROPBOX_APP_KEY`, `MIRROR_DROPBOX_APP_SECRET`, `MIRROR_DROPBOX_REFRESH_TOKEN`, `MIRROR_DROPBOX_ACCOUNT_ID` |
-| `proton` | `destination`, `destination_uid` | `MIRROR_PROTON_DESTINATION`, `MIRROR_PROTON_DESTINATION_UID` |
-| `r2` | `access_key_id`, `secret_access_key`, `endpoint`, `bucket` | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_ENDPOINT_URL_S3`, `MIRROR_R2_BUCKET` |
-| `age` | `identity` | `MIRROR_AGE_IDENTITY` |
-| `healthcheck` | `url` | `HEALTHCHECK_URL` |
-
-### 1. 1Password
-
-This organization keeps one vault, `Katoptra`, with one item per mirror, and one service
-account that reads it, stored as the organization secret `OP_SERVICE_ACCOUNT_TOKEN`. A
-fork makes its own vault and service account and puts the token in a repository secret
-of the same name. The vault goes into the references in `op.env` by UUID, from
-`op vault get <name> --format json`: a reference is `op://<vault>/<item>/<section>/<field>`,
-so a slash in a vault name cannot be written, and a UUID survives a rename. Neither the
-name nor the UUID is a secret: without the service-account token it opens nothing.
-
-### 2. Dropbox
-
-The pipeline reads Dropbox over the API alone, both for listing and for downloading.
-
-1. At https://www.dropbox.com/developers/apps create a Scoped access, Full Dropbox app.
-   Under Permissions enable only `files.metadata.read` and `files.content.read`. The
-   mirror can never write to Dropbox. Note the App key and App secret.
-2. Get a refresh token. Open, with your key filled in,
-   `https://www.dropbox.com/oauth2/authorize?client_id=APP_KEY&response_type=code&token_access_type=offline`.
-   `token_access_type=offline` is what makes the token permanent. Approve, copy the code,
-   and exchange it:
-
-   ```bash
-   curl https://api.dropboxapi.com/oauth2/token \
-     -d code=THE_CODE -d grant_type=authorization_code -u APP_KEY:APP_SECRET
-   ```
-
-   The response holds both an `access_token` (four hours) and a `refresh_token` (never
-   expires, never rotates). Store `app_key`, `app_secret` and `refresh_token` as fields of
-   the vault item `dropbox`.
-3. Record the account id. Mint an access token from the refresh token (this is what every
-   run does) and ask who you are:
-
-   ```bash
-   curl https://api.dropboxapi.com/oauth2/token \
-     -d grant_type=refresh_token -d refresh_token=REFRESH_TOKEN -u APP_KEY:APP_SECRET
-   curl -X POST https://api.dropboxapi.com/2/users/get_current_account \
-     -H "Authorization: Bearer ACCESS_TOKEN"
-   ```
-
-   Store the `account_id` (the whole `dbid:...` string) as field `account_id` of the same
-   item. Every run verifies the account it is reading against this value and refuses a
-   mismatch, so a swapped credential can never turn another account's listing into a
-   trash list.
-
-### 3. Proton Drive
-
-Proton's CLI can only be seeded by a browser sign-in, and fresh sign-ins from datacenter
-addresses are blocked, so the session is created once on the laptop and carried to CI as an
-encrypted file. Every run restores it before the first CLI call and writes it back after
-every CLI call, because its refresh token rotates.
-
-1. Turn telemetry off in Proton account settings.
-2. Install the macOS `proton-drive` CLI from https://proton.me/download/drive/cli at the
-   version katoptra/lib's `toolchain.lock.toml` pins for the image. The session file
-   format is tied to the version; the Linux binary in the toolbox must be able to read
-   what the laptop wrote.
-3. Sign in, with the session written as plain files under `.run/pd` (the directory must be
-   inside this repo, since only the repo is mounted into the toolbox; `.run/` is ignored by
-   git and deleted by `task clean`):
-
-   ```bash
-   PROTON_DRIVE_CACHE_DIR=.run/pd PROTON_DRIVE_CREDENTIALS_STORE=unsafe_file proton-drive auth login
-   ```
-
-   Afterwards `.run/pd` holds `auth-session.json` and `clientUid.json`.
-4. Create the destination folder. In the CLI, `/my-files` is the existing "My files" root
-   of your drive, not a folder you create. Create one folder under it:
-
-   ```bash
-   PROTON_DRIVE_CACHE_DIR=.run/pd PROTON_DRIVE_CREDENTIALS_STORE=unsafe_file \
-     proton-drive filesystem create-folder /my-files Dropbox
-   PROTON_DRIVE_CACHE_DIR=.run/pd PROTON_DRIVE_CREDENTIALS_STORE=unsafe_file \
-     proton-drive filesystem list -j /my-files
-   ```
-
-   Store the folder's CLI path (`/my-files/Dropbox`) as field `destination` of vault item
-   `proton`. In the listing find the entry whose `name.value` is `Dropbox` and store its
-   `uid` as field `destination_uid`. Every run lists the parent, finds the folder by name,
-   and compares its UID with this value before touching it. A listing that shows no
-   `Dropbox` entry, or one whose UID differs, fails the run with `configured Proton
-   destination did not resolve to exactly one folder` or `did not exactly match the
-   listing`; the usual cause is the folder created one level too deep or the wrong
-   entry's UID copied.
-5. Seal the session into R2 (after step 5 below has created the bucket):
-
-   ```bash
-   task session-seal -- .run/pd
-   ```
-
-Checked against CLI 0.8.0: the upload flags in
-[src/migrator/providers/proton_cli.py](src/migrator/providers/proton_cli.py) (`-f
-create-new-revision -d merge --json --skip-thumbnails`) match `filesystem upload --help`;
-`-t` is the short form of `--skip-thumbnails` and `--json` is a general option. Re-check
-this whenever the pinned CLI version changes.
-
-### 4. age
-
-Run `age-keygen` once and store the `AGE-SECRET-KEY-...` line as field `identity` of vault
-item `age`. Both the state and the session in R2 are encrypted to this identity, since the
-state holds every mirrored path name.
-
-### 5. Cloudflare R2
-
-Create a bucket and an API token scoped to it, and a lifecycle rule that expires objects
-under `.state/history/` after 30 days. Store `access_key_id`, `secret_access_key`,
-`endpoint` (`https://<account-id>.r2.cloudflarestorage.com`) and `bucket` as fields of
-vault item `r2`; `op.env` resolves them as `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`,
-`AWS_ENDPOINT_URL_S3` and `MIRROR_R2_BUCKET`, the names boto3's S3 client reads directly.
-`AWS_REGION=auto` is a literal `ENV` line in the image, not a vault value: R2 has one
-region, and `op run` masking the word `auto` would corrupt ordinary output.
-
-### 6. healthchecks.io
-
-Create a check whose schedule matches the nightly dispatch, with a grace period long enough
-for a queued run plus a full one. Store the ping URL as field `url` of vault item
-`healthcheck`. Chained runs ping more often than the schedule, which the check ignores.
-
-### 7. Prove the read path
-
-```bash
-task image     # pulls the toolbox image once; every later task reuses it
-task test      # the pytest suite, offline
-task check     # every pipeline command rendered inside the image, diffed against render.txt
-task plan      # the real thing, read-only: lists Dropbox, fetches the state, prints the plan
+```mermaid
+flowchart LR
+  clock --> cp["clock"] --> session --> state --> inventory --> delta --> plan --> batches
+  subgraph b["batches: each until the run's budget"]
+    direction LR
+    fetch --> verify --> upload --> confirm --> checkpoint
+  end
+  batches --> b --> trash --> reconcile["reconcile<br/>weekly"] --> rp["report"] --> report --> ping
+  classDef own stroke-dasharray: 5 5
+  class cp,session,state,inventory,delta,plan,batches,fetch,verify,upload,confirm,checkpoint,trash,reconcile,rp own
 ```
 
-`task plan` needs the vault and the session, and mutates nothing in Proton. Its output is
-the same report a run produces, with the mirror status and the batches it would move.
+| Step | Does |
+|---|---|
+| `clock` | The migrator's own stamp after the toolbox's: the run's start to `.run/clock.json`; clears staging, the report and the chain marker |
+| `session` | Fetches the encrypted Proton CLI session from the bucket and unpacks it for every later CLI call |
+| `state` | Fetches the state database and starts the run row. A missing state is accepted as an empty mirror only when the history is empty too; a missing state beside history is refused, because a lost state must never look like an empty mirror |
+| `inventory` | Walks Dropbox over the API, each page committed with its cursor. Entries with no content hash are recorded as non-downloadable and excluded. Display paths are rebuilt from each ancestor's own name, because Dropbox cases parent segments inconsistently |
+| `delta` | Compares the inventory against `mirror_objects` on path, size and content hash. Refuses a listing under half the mirrored file count, so a truncated listing can never become a trash list |
+| `plan` | Refuses a tree over `ceiling_gb` or a batch the disk cannot stage. Leaves out files over `max_file_gb` and counts them as oversized. Packs the rest into batches of `batch_gb` and `batch_files` |
+| `batches` | Runs each batch through the five steps below, stopping before a batch that would pass the run's budget; stopping with batches left is a success that chains the next run |
+| `fetch` | Downloads the batch from Dropbox into staging under its display paths; a path that vanished since listing is counted and skipped |
+| `verify` | Recomputes every staged file's Dropbox content hash and records SHA-1 and SHA-256. A mismatch is a file edited since listing: removed and counted, never recorded |
+| `upload` | One `proton-drive filesystem upload` of the staging tree; Proton skips files whose content it already holds and makes revisions of changed ones |
+| `confirm` | The upload summary must account for every verified file plus every folder, and every failure must name a file in the batch. Those alone are recorded as failed; the rest confirm |
+| `checkpoint` | Merges the confirmed rows into `mirror_objects` and pushes the state to the bucket, a dated copy first and then the canonical key. Always the last step of a batch, so a killed run repeats at most one |
+| `trash` | Only when every planned batch landed: one listing and one `filesystem trash` per folder of deleted files |
+| `reconcile` | On the first run of the configured weekday, or with `RECONCILE=true`: a full Proton walk compared against `mirror_objects`. Rows Proton lacks or mis-sizes are dropped so they re-upload; nodes neither Dropbox nor the state knows are trashed. A walk that does not fit one run resumes on the next, and a partial walk drops and trashes nothing |
+| `report` | Builds the step summary from the state alone, finishes the run row, writes the chain marker, and returns the run's status |
 
-### 8. Seed
+Every step is plan-by-default: `batches`, `trash`, `reconcile`, `report` and
+`empty-trash` change anything only with `--apply`, which `task pipeline` passes and
+`task plan-pipeline` never does. No mutation is trusted on its exit status. The evidence
+has three layers: the upload summary per batch, matched item by item; Proton's own
+server-side block hashes, checked at upload and out of this repository's hands; and the
+weekly walk, which compares Proton's own listing against the state independently of
+anything a batch claimed.
 
-Dispatch the `sync` workflow once from the Actions tab or with
-`gh workflow run sync.yml`. The first run finds no state and no history, treats the whole
-tree as the delta, and chains itself run after run until the tree is mirrored: each run
-stops starting batches at its budget, checkpoints what landed, and queues the next run,
-which picks up from the state in R2. Each run's step summary shows percent mirrored and
-projected runs remaining.
+The run around those steps, from the image and the secrets to the report and the ping,
+is the toolbox's and is documented once in
+[lib's README](https://github.com/katoptra/lib#the-toolbox).
 
-The default budget is 335 minutes under a 355-minute job timeout, just under GitHub's
-six-hour limit for one job: every run pays one image pull, one Dropbox listing and one
-unused tail of up to a batch, so fewer, longer runs waste less. The 20-minute gap leaves
-the last batch's upload and the report room to finish.
-Actions minutes on a public repository are free, so the seed can run on Actions alone.
-For a 200,000-file tree expect about 36 hours of Proton upload at the measured 0.65 s per
-file plus 6 to 10 hours of Dropbox downloads, around 45 hours in all, or roughly sixteen
-chained runs at the default budget.
+## Want your own?
 
-`task sync` from a laptop behaves exactly like one chained run: it stops on
-`RUN_BUDGET_MIN`, reports percent mirrored, and the next `task sync` picks up from R2. Use
-it only while no Actions run is in progress.
+### 1. Fork it
 
-### 9. Schedule
+Fork [katoptra/dropbox](https://github.com/katoptra/dropbox). Nothing in `Taskfile.yml`
+names an account; [`config/mirror.toml`](config/mirror.toml) is the one behaviour input
+and its defaults fit a GitHub runner. The account is the environment, all of it `op.env`.
 
-Add `schedules/dropbox.ts` to jshvn/dispatch with `10 2 * * *`. A scheduled run
-queues behind a chained one in the workflow's concurrency group. After three green nights,
-edit one file and delete one file in Dropbox and confirm both appear in Proton the next
-morning: the edit as a new revision, the delete in Proton's trash.
+### 2. Storage
 
-## ▶️ Running it
+The bucket holds the state and the session, nothing of the mirrored tree.
+
+```
+.state/state.sqlite.xz.age                     the state: evidence tables, mirror_objects, runs, batches, deletions
+.state/history/<epoch>-<label>.sqlite.xz.age   one copy per checkpoint; label is the batch number, trash, reconcile or report
+.state/session.tar.age                         the Proton CLI session; no history, a stale copy cannot be restored
+```
+
+| What | Why |
+|---|---|
+| An R2 bucket, or any S3-compatible bucket | The state and the session |
+| An API token with Object Read & Write, scoped to that bucket | The `r2` values in step 3 |
+| A lifecycle rule expiring `.state/history/` after 30 days | The bucket has no object versioning; the dated copies are the rollback |
+
+The state holds every mirrored path name, which is why it is encrypted. What the toolbox
+and the engines keep in a bucket: [lib, Storage](https://github.com/katoptra/lib#storage).
+
+### 3. Secrets
+
+Twelve values, in one vault item named `dropbox`, one section per service:
+
+| Section | Field | What it is | Reaches the run as |
+|---|---|---|---|
+| `dropbox` | `app_key`, `app_secret` | The scoped app, step 4 | `MIRROR_DROPBOX_APP_KEY`, `MIRROR_DROPBOX_APP_SECRET` |
+| `dropbox` | `refresh_token` | Its permanent token | `MIRROR_DROPBOX_REFRESH_TOKEN` |
+| `dropbox` | `account_id` | The `dbid:...` the run must be reading | `MIRROR_DROPBOX_ACCOUNT_ID` |
+| `proton` | `destination` | The CLI path of the folder, `/my-files/Dropbox` | `MIRROR_PROTON_DESTINATION` |
+| `proton` | `destination_uid` | That folder's UID | `MIRROR_PROTON_DESTINATION_UID` |
+| `r2` | `access_key_id`, `secret_access_key` | The token from step 2 | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` |
+| `r2` | `endpoint` | `https://<account-id>.r2.cloudflarestorage.com` | `AWS_ENDPOINT_URL_S3` |
+| `r2` | `bucket` | The bucket's name | `MIRROR_R2_BUCKET` |
+| `age` | `identity` | An `AGE-SECRET-KEY-...` line from `age-keygen` | `MIRROR_AGE_IDENTITY` |
+| `healthcheck` | `url` | Optional: a healthchecks.io ping URL | `HEALTHCHECK_URL` |
+
+Put your vault's UUID into the references in [`op.env`](op.env), make a service account
+that can read that vault, and store its token as the `OP_SERVICE_ACCOUNT_TOKEN` secret,
+on the organization or on the repository. Finding a vault's UUID and why a UUID and not
+a name: [lib, Secrets](https://github.com/katoptra/lib#secrets).
+
+### 4. Dropbox and Proton
+
+**The Dropbox app.** At https://www.dropbox.com/developers/apps create a Scoped access,
+Full Dropbox app with only `files.metadata.read` and `files.content.read`; the mirror
+can never write to Dropbox. Then a refresh token, which never expires or rotates, and
+the account id, which every run checks before trusting a listing:
+
+```sh
+# 1. approve, with your key filled in, and copy the code:
+#    https://www.dropbox.com/oauth2/authorize?client_id=APP_KEY&response_type=code&token_access_type=offline
+curl https://api.dropboxapi.com/oauth2/token -d code=THE_CODE -d grant_type=authorization_code -u APP_KEY:APP_SECRET
+# 2. the refresh_token from that response is the vault field; mint an access token from it and ask who you are:
+curl https://api.dropboxapi.com/oauth2/token -d grant_type=refresh_token -d refresh_token=REFRESH_TOKEN -u APP_KEY:APP_SECRET
+curl -X POST https://api.dropboxapi.com/2/users/get_current_account -H "Authorization: Bearer ACCESS_TOKEN"
+# 3. the whole dbid:... string is account_id
+```
+
+**The session.** The Proton CLI can only be seeded by a browser sign-in, so the session
+is made once on a laptop and carried to every run encrypted; the commands, the folder and
+its UID, and `task session-seal -- .run/pd` are in
+[lib, The session](https://github.com/katoptra/lib#the-session). Turn telemetry off in
+Proton's account settings first. Store the folder's CLI path as `destination` and its
+`uid` from the listing as `destination_uid`. This mirror's session is its own.
+
+### 5. Prove it, run it, schedule it
+
+On a laptop with go-task, the 1Password CLI and Docker or Apple `container`:
+
+```sh
+task test      # the pytest suite, offline, inside the image
+task check     # every pipeline command rendered inside the image, diffed against render.txt
+task plan      # the real thing, read-only: the state, the Dropbox listing, the plan it would move
+```
+
+Then Actions, sync, Run workflow. The first run finds no state and no history, treats
+the whole tree as the delta, and chains itself run after run until the tree is mirrored:
+each run stops starting batches at its budget, checkpoints what landed, and queues the
+next. The default budget is 335 minutes under a 355-minute job timeout, just under
+GitHub's six-hour limit, because every run pays one image pull and one listing. A
+200,000-file tree is about 45 hours, roughly sixteen chained runs.
+
+Nothing in this repository schedules a run: add a `schedule:` trigger to
+`.github/workflows/sync.yml`, or dispatch it from outside as this mirror is. A scheduled
+run queues behind a chained one. After three green nights, edit one file and delete one
+in Dropbox and confirm both appear in Proton the next morning.
+
+## Operating it
 
 `task` alone prints the menu, grouped by effect. Everything runs inside the toolbox.
 
-#### Read: looks at Dropbox, Proton and R2, changes nothing
-
-```bash
-task plan      # fetch the state, list Dropbox, print what a sync would move
-task status    # counts and the last run's figures from the state in R2
-```
-
-`task plan` starts a run row in its local copy of the state and never pushes it. `task
-status` fetches the state, prints, and starts nothing; both leave `.run/state.sqlite`
-behind for inspection. Neither makes a Proton call, so both are safe while CI may be
-running.
-
-#### Checks: offline, no credentials
-
-```bash
-task test      # pytest inside the toolbox
-task lint      # ruff check and format check
-task fmt       # ruff format
-task check     # render every pipeline command inside the image, diff against render.txt
-task render-update   # accept the current render as render.txt
-```
-
-#### Write: changes Proton Drive and the state in R2
-
-```bash
-task sync                          # one budgeted run, the same thing CI runs
-task sync -- RUN_BUDGET_MIN=30     # with a shorter budget
+```sh
+task plan                          # read-only: the state, the listing, what a sync would move
+task status                        # counts and the last run's figures from the state in the bucket
+task test && task lint             # pytest; ruff check and format check
+task sync                          # one budgeted run, the same thing Actions runs
+task sync -- RUN_BUDGET_MIN=30     # a shorter budget
 task sync -- RECONCILE=true        # force the weekly Proton walk (the literal word true)
-task empty-trash                   # permanently delete Proton trash; asks first; never scheduled
-task state-rollback                # list the dated history objects in R2
+task state-rollback                # list the dated history objects
 task state-rollback -- <key>       # copy one of them over the canonical state
-task session-seal -- .run/pd       # encrypt a laptop Proton CLI session into R2
+task session-seal -- .run/pd       # encrypt a laptop Proton CLI session into the bucket
+task empty-trash                   # permanently delete Proton's trash; asks first; never scheduled
 ```
 
-Never run `task sync` or `task empty-trash` from the laptop while a CI run may be in
-progress. Two processes holding the Proton session race its rotating refresh token, the
-loser's copy dies, and the next run needs a fresh login.
+Never run `task sync` or `task empty-trash` from a laptop while an Actions run may be in
+progress: both hold the one Proton session. `task sync` from a laptop is exactly one
+chained run, and the next one, wherever it runs, picks up from the state in the bucket.
 
-#### Toolbox
+**Reading a run.** The step summary is built from the state alone, so `task status` on a
+laptop shows the same figures as the Actions page, and it carries counts only, never a
+path name: mirror status (inventory, mirrored, percent, oversized, batches and runs
+remaining); this run (budget used, batches, files fetched, vanished, mismatched,
+uploaded, skipped, confirmed, trashed); throughput; throttling per provider; errors by
+class; the last reconcile walk; every phase's status. Error text lives in the encrypted
+state's `events` table, readable after `task status` from `.run/state.sqlite`.
 
-```bash
-task image              # pull the toolbox image (no-op while it exists)
-task image-build        # build it from a local katoptra/lib checkout instead (LIB_DIR=../lib)
-task image-clean        # remove it so the next task pulls again
-task clean              # delete .run, the caches and every other file git ignores
-task run -- <cmd>       # any command in the toolbox with the repo at /work
-task op -- <cmd>        # the same with secrets from 1Password via op.env
-```
+**Runbook.**
 
-`task clean` is `git clean -fdX`: it removes only files git already ignores, so the
-decrypted state, a laptop Proton session under `.run/pd`, staging, the caches, the
-toolbox include under `.task/` and stray lockfiles go, and nothing tracked or unignored
-is touched.
+- **`login first` in the events, or a failure at the first Proton call.** The session is
+  gone. Sign in again on a laptop and `task session-seal -- .run/pd`.
+- **`configured Proton destination did not resolve to exactly one folder`, or `did not
+  exactly match the listing`.** The folder is not a direct child of its parent, or its
+  UID differs from the vault's. List the parent and fix the folder or the field.
+- **`MIRROR_DROPBOX_ACCOUNT_ID ... must be a full dbid: identifier`.** The field is empty
+  or `op.env` names the wrong one.
+- **`state object is missing but history exists`.** `task state-rollback`; never delete
+  the history to make a run start fresh.
+- **The state looks wrong after a run.** `task state-rollback -- <key>` copies a dated
+  copy over the canonical state; re-uploads skip content Proton already holds.
+- **Files confirm failed.** Proton refused those uploads, usually a passing server error;
+  the text is in the state under the batch item. The next run re-uploads them.
+- **A run stops on budget every night.** Lower `batch_files` or `batch_gb`; the throughput
+  rows say which. A run that checkpointed nothing does not chain and fails instead.
+- **Proton 429s.** The throttling table is the gauge; lower `batch_gb`.
+- **A weekly reconcile does not finish in one run.** Normal on a large tree; it resumes on
+  the next run that reconciles.
+- **A flag seems ignored.** Flags go after the double dash; before it they set a host-side
+  var that never reaches the container. `RECONCILE` takes the literal word `true`.
+- **A case-only rename in Dropbox does not reach Proton.** Files are keyed by lowercased
+  path. Rename to something else and back if the case matters.
+- **Move the folder in Proton.** Move it anywhere under My files and change the vault's
+  `destination`; the UID survives and every run verifies it.
+- **Switch the Dropbox account.** New `refresh_token` and `account_id` fields. The next
+  run trashes what the old account had and mirrors the new tree; to start clean, empty
+  the Proton folder and delete the state and its history first.
 
-## ⚙️ GitHub Actions
+## Reference
 
-[sync.yml](.github/workflows/sync.yml) is dispatch-only and calls
-[katoptra/lib](https://github.com/katoptra/lib)'s reusable `sync.yml` at `v2`, which
-installs go-task and the 1Password CLI at the versions in lib's lock, pulls the image, and
-runs `task sync -- <vars>`. The one input, `vars`, carries `KEY=value` pairs for the
-pipeline: `gh workflow run sync.yml -f vars='RECONCILE=true RUN_BUDGET_MIN=30'`.
-`concurrency: {group: sync, cancel-in-progress: false}` is what queues a chained or
-scheduled run behind a running one; overlap would kill the Proton session.
-`timeout-minutes: 355` against a default budget of 335 leaves the last batch's upload and
-the report room to finish. `OP_SERVICE_ACCOUNT_TOKEN` is the repository's one secret,
-inherited by the called workflow; `task sync` runs the pipeline through `task op`, the
-same `op run --env-file=op.env` wrapper the laptop uses, and a pipeline that fails still
-reports and pings `/fail` inside that same container, and a run the runner cut off (the
-timeout, a cancellation) gets the same from the workflow. When `report` left a `.run/chain`
-marker, the called workflow queues the next run with `gh workflow run`, which is the only
-reason the caller grants `actions: write`. Nothing else in this repo starts a run; the
-nightly dispatch comes from jshvn/dispatch.
-
-[check.yml](.github/workflows/check.yml) runs on pull requests: lib's reusable `check.yml`,
-which renders the pipeline inside the image and diffs it against [render.txt](render.txt),
-and a second job for `task test` and `task lint`. Neither has access to the vault, so a
-pull request from a fork can run it safely. GitHub registers it when the first pull
-request is opened.
-
-On a public repository the run logs and step summaries are public too. What they carry:
-phase lines, counts, retry warnings with the provider's error class, and the report
-tables. What they never carry: a path name, a credential, or an account identifier; the
-`op run` masks every value it resolved, `MIRROR_VERBOSE` is off by default so an
-error prints as its class, and the report is built from counts alone. Only collaborators
-can dispatch the workflow.
-
-## 🔧 Configuration
-
-[config/mirror.toml](config/mirror.toml) is the one behavior input; the schema is strict
-and rejects unknown keys. It names no account.
+**Configuration.** [`config/mirror.toml`](config/mirror.toml) is strict and rejects
+unknown keys. It names no account.
 
 | Key | Meaning |
 |---|---|
-| `mirror.id` | Name recorded in the state. |
-| `dropbox.root` | Subtree to mirror; empty means the whole Dropbox. |
-| `dropbox.page_limit`, `minimum_call_interval_seconds` | Listing page size and the serialised call spacing. |
-| `dropbox.download_workers` | Files fetched in flight during `fetch`, under the shared Dropbox rate limit. |
-| `budget.batch_gb`, `batch_files` | A batch's byte and file caps; a file over `batch_gb` is a batch by itself. |
-| `budget.max_file_gb` | Largest file a plan will stage; bigger files are left out and counted as oversized. A GitHub runner guarantees 14 GB of disk. |
-| `budget.run_budget_minutes` | Wall-clock budget from the run's start; batches stop starting when it runs out. |
-| `budget.ceiling_gb` | Refuse a Dropbox tree larger than this. |
-| `budget.disk_headroom_gb` | Free disk the runner must keep beyond a batch's staging. |
-| `budget.listing_floor_ratio` | Refuse a listing smaller than this share of the mirrored file count. |
-| `proton.walk_workers` | Folder listings in flight during the reconcile walk, each from its own copy of the CLI session (1 to 32). |
-| `reconcile.weekday` | UTC weekday (0 is Monday) whose first run does the Proton walk. |
+| `mirror.id` | Name recorded in the state |
+| `dropbox.root` | Subtree to mirror; empty means the whole Dropbox |
+| `dropbox.page_limit`, `minimum_call_interval_seconds` | Listing page size and the serialised call spacing |
+| `dropbox.download_workers` | Files fetched in flight during `fetch` |
+| `budget.batch_gb`, `batch_files` | A batch's byte and file caps; a file over `batch_gb` is a batch by itself |
+| `budget.max_file_gb` | Largest file a plan will stage; bigger files are counted as oversized |
+| `budget.run_budget_minutes` | Wall-clock budget from the run's start; `sync.yml`'s timeout stays 20 minutes above it |
+| `budget.ceiling_gb` | Refuse a Dropbox tree larger than this |
+| `budget.disk_headroom_gb` | Free disk the runner must keep beyond a batch's staging |
+| `budget.listing_floor_ratio` | Refuse a listing smaller than this share of the mirrored file count |
+| `proton.walk_workers` | Folder listings in flight during the reconcile walk, each from its own copy of the session |
+| `reconcile.weekday` | UTC weekday (0 is Monday) whose first run does the Proton walk |
 
-The account is the environment, all of it read in `src/migrator/env.py` and
-`src/migrator/config.py`: the twelve names in `op.env`, of which
-`MIRROR_DROPBOX_ACCOUNT_ID` (the `dbid:` the run must be reading; anything else is
-refused), `MIRROR_PROTON_DESTINATION` (the CLI path of the mirror root) and
-`MIRROR_PROTON_DESTINATION_UID` (its UID, verified on every run before any write) override
-the TOML keys `dropbox.expected_account_id`, `proton.destination` and
-`proton.expected_destination_uid`, which exist for a private fork that prefers a file.
-Run overrides go after the double dash, `task sync -- RUN_BUDGET_MIN=30 RECONCILE=true`,
-or in the workflow's `vars` input; the Taskfile maps them to the environment the migrator
-reads. `MIRROR_VERBOSE=1` in the environment prints an error's full text instead of its
-class; `MIRROR_WORK_DIR` (default `.run`) and `MIRROR_CONFIG` (default
-`config/mirror.toml`) are set by the Taskfile. The non-vault `AWS_REGION` literal is an
-`ENV` line in the image so every process in the toolbox sees it.
+The three account identifiers in `op.env` override the TOML keys
+`dropbox.expected_account_id`, `proton.destination` and `proton.expected_destination_uid`,
+which exist for a private fork that prefers a file. `MIRROR_VERBOSE=1` prints an error's
+full text instead of its class.
 
-## 📊 Reading a run
+**What sits where.** The mirrored tree includes personal documents. During a batch its
+files sit decrypted on the runner's ephemeral disk and in memory, which is inherent:
+Dropbox serves plaintext and Proton encrypts client-side inside the CLI. What bounds it:
+the runner is a single-tenant VM destroyed after the job; logs and the step summary carry
+counts, never names; no workflow artifact is ever uploaded; the state, which holds every
+path name, is age-encrypted at rest; the Dropbox credentials cannot write, the bucket
+token reaches one bucket, and the service account reads one vault.
 
-The step summary is built from the state database alone, so `task status` on a laptop
-shows the same figures as the Actions page. It carries counts only, never a path name:
+Pull requests are welcome.
 
-- **Mirror status**: inventory files and bytes, mirrored files and bytes, percent mirrored,
-  non-downloadable entries, oversized files and bytes, batches and bytes remaining,
-  projected runs remaining, chain.
-- **This run**: budget used, batches planned and completed, files fetched, vanished and
-  hash-mismatched, files and bytes uploaded, skipped as content-identical by Proton,
-  confirmed, checkpointed, trashed.
-- **Throughput**: GB/h down from Dropbox and up to Proton; batch durations (min, median,
-  max).
-- **Throttling** per provider: rate-limit responses, seconds waited, longest wait.
-- **Errors and issues** by class, and **Verification**: files confirmed this run and
-  cumulatively, the last reconcile walk's state (complete or partial), matched,
-  dropped, strays trashed, folders trashed and mismatches.
-- **Phases**: the status of every phase of the run.
-
-Error text lives in the encrypted state, in the `events` table. After `task status`:
-
-```bash
-task run -- python -c "import sqlite3; c=sqlite3.connect('.run/state.sqlite'); print(*c.execute(\"SELECT timestamp, phase, message, safe_raw_error FROM events WHERE level='ERROR' ORDER BY id DESC LIMIT 20\"), sep='\n')"
-```
-
-## 🗄️ State and R2 layout
-
-```
-.state/state.sqlite.xz.age                     the state: evidence tables + mirror_objects, runs, batches, deletions
-.state/history/<epoch>-<label>.sqlite.xz.age   one copy per checkpoint; label is the batch number, trash, reconcile or report
-.state/session.tar.age                         the Proton CLI session (auth-session.json, clientUid.json); no history
-```
-
-R2 has no object versioning, so every checkpoint writes the dated copy first and then a
-server-side copy to the canonical key; a bad state rolls back with `task state-rollback`.
-The session gets no history because a stale copy holds a rotated-out refresh token and
-cannot be restored. The work directory `.run/` on the runner holds the decrypted state,
-the session and staging for the life of one job; it is never uploaded as an artifact and
-is ignored by git.
-
-## 🩹 Runbook
-
-- **`login first` in the state events, or a run that fails at the first Proton call.** The
-  session is gone. Repeat setup step 3's sign-in and `task session-seal -- .run/pd`.
-- **`configured Proton destination did not resolve to exactly one folder`.** The folder
-  named in the vault's `proton/destination` is not a direct child of its parent in
-  Proton. List the parent with `filesystem list -j` and either move the folder or fix the
-  field.
-- **`did not exactly match the listing`.** The folder exists but its UID differs from the
-  vault's `proton/destination_uid`. Copy the UID from the listing if the folder was
-  recreated on purpose.
-- **`MIRROR_DROPBOX_ACCOUNT_ID ... must be a full dbid: identifier` at startup.** The
-  vault field is empty or the reference in `op.env` or `sync.yml` names the wrong field.
-- **`state object is missing but history exists`.** Roll back with `task state-rollback`.
-  Never delete the history to make a run start fresh.
-- **The state looks wrong after a run.** `task state-rollback` lists the dated copies;
-  `task state-rollback -- <key>` copies one over the canonical state. The next run repeats
-  from there, and re-uploads skip content Proton already holds.
-- **The report shows files confirm failed.** Proton's CLI refused those uploads, usually
-  a passing server error; the error text is in the state under the batch item. The batch
-  checkpointed without them and the next run re-uploads them. A file that fails every
-  night is worth reading the error for.
-- **A run stops on budget every night without finishing.** Lower `batch_files` or
-  `batch_gb`; the throughput and batch-duration rows say which. A run that checkpointed
-  nothing does not chain and fails instead, so a batch that fails identically cannot loop.
-- **Proton 429s or a collapsing upload rate.** The throttling table is the gauge; lower
-  `batch_gb`. Dropbox stays at 10 requests a second.
-- **A weekly reconcile does not finish in one run.** Normal on a large tree: the walk
-  resumes where it stopped on the next run that reconciles, whether that is the following
-  scheduled weekday or a run forced with `RECONCILE=true`, and finishes over as many runs
-  as it needs.
-- **A flag such as `RUN_BUDGET_MIN` seems ignored.** The report's "budget minutes" row
-  shows what the run saw. `RECONCILE` takes the literal word `true`. Both go after the
-  double dash, `task sync -- RUN_BUDGET_MIN=30`; before it they set a host-side task var
-  that never reaches the container.
-- **The report shows oversized files.** They are over `max_file_gb` or over what the
-  runner's disk could stage, and percent mirrored stays short by their bytes. Upload them
-  by hand to their Dropbox path under the destination: the reconcile walk leaves alone any
-  Proton node whose path the Dropbox listing knows, so a manual copy is never trashed.
-  Or shrink or move the file in Dropbox.
-- **A case-only rename in Dropbox does not reach Proton.** Files are keyed by their
-  lowercased path, so changing only the case of a name changes nothing in the delta and
-  Proton keeps the old spelling. Rename to something else and back if the case matters.
-- **Move the mirror folder in Proton.** Rename or move it anywhere under My files, then
-  change the vault's `proton/destination`. The UID survives both, and every run verifies
-  it.
-- **Switch the Dropbox account.** New `refresh_token` and `account_id` fields from setup
-  step 2 signed in as the new account; no commit is needed. The next run trashes what the
-  old account had and mirrors the new tree; to start clean instead, empty the Proton
-  folder and delete both the state object and everything under `.state/history/` before
-  the switch.
-- **Move the runner.** The same image, Taskfile and `op.env` run anywhere with a container
-  engine, go-task and `op`: `task sync` is the whole job and the next cron tick is the
-  chain.
-
-## 🔒 What sits where
-
-The mirrored tree includes personal documents. During a batch its files sit decrypted on
-the runner's ephemeral disk and in memory, which is inherent: Dropbox serves plaintext and
-Proton encrypts client-side inside the CLI. What bounds it: the runner is a single-tenant
-VM destroyed after the job; logs and the step summary carry counts, never names; no
-workflow artifact is ever uploaded; the state, which holds every path name, is
-age-encrypted at rest; the Dropbox credentials cannot write, the R2 token reaches one
-bucket, and the service account reads one vault.
-
-What the public repository holds: code, the Taskfile, the behavior config, and
-`op://` references made of a vault UUID and field names. What it does not hold: any
-credential, the Dropbox account id, the Proton folder path or UID, the bucket name or
-endpoint, the healthcheck URL, or any mirrored path name.
-
-## 🗂️ Repository layout
-
-```
-Taskfile.yml              the mirror's own verbs around katoptra/lib's toolbox, included at v2
-.taskrc.yml               trusts raw.githubusercontent.com for the include; refetched hourly at most
-render.txt                the committed dry run of the pipeline; task check diffs against it
-op.env                    op:// references, committed; the one place vault names are listed for the laptop
-config/mirror.toml        the one behavior input; names no account
-src/migrator/             the package: commands, phases/, providers/, state, store, crypt, session
-tests/                    pytest suite, no network; tests/fixtures/live/ is ignored by git
-.github/workflows/        sync.yml and check.yml, callers of katoptra/lib's workflows at v2
-.run/                     work directory at run time; ignored by git, removed by task clean
-.task/                    the include cache; rides into the image, so a run needs no network
-```
+MIT licensed. Built by [Josh Vaughen](https://ijosh.com).
